@@ -54,7 +54,8 @@ def _parse_ldplus_json(html: str) -> dict[str, Any] | None:
     return None
 
 
-def _build_graphql_payload(lsd: str, keyword: str) -> dict[str, str]:
+def _build_graphql_payload(lsd: str, keyword: str, location: str = "") -> dict[str, str]:
+
     """Build the form-encoded payload for Meta's GraphQL endpoint."""
     # Exact variable structure confirmed by Playwright network capture.
     # IMPORTANT: results_per_page MUST be null (not an integer) — any int causes
@@ -63,7 +64,8 @@ def _build_graphql_payload(lsd: str, keyword: str) -> dict[str, str]:
         "search_input": {
             "q": keyword,
             "divisions": [],
-            "offices": [],
+            "offices": [location] if location else [],
+
             "roles": [],
             "leadership_levels": [],
             "saved_jobs": [],
@@ -107,7 +109,14 @@ async def _fetch_job_detail(client: httpx.AsyncClient, job_id: str) -> dict[str,
         return {}
 
 
-async def fetch_meta_jobs(keyword: str = "Software", location: str = "", max_pages: int = 2) -> list[dict[str, Any]]:
+async def fetch_meta_jobs(
+    keyword: str = "Software",
+    location: str = "",
+    max_pages: int = 2,
+    page: int = 1,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+
     """
     Fetch Meta Careers job listings using the GraphQL API endpoint.
 
@@ -147,7 +156,8 @@ async def fetch_meta_jobs(keyword: str = "Software", location: str = "", max_pag
 
         # Step 2: Fetch job list via GraphQL (single call returns all matches)
         try:
-            payload = _build_graphql_payload(lsd, keyword)
+            payload = _build_graphql_payload(lsd, keyword, location)
+
             r = await client.post(_GRAPHQL_URL, headers=graphql_headers, data=payload)
             r.raise_for_status()
             resp_json = r.json()
@@ -163,9 +173,16 @@ async def fetch_meta_jobs(keyword: str = "Software", location: str = "", max_pag
         if not raw_jobs:
             return []
 
-        # Limit how many detail pages we fetch to avoid overloading
-        max_detail_fetches = min(len(raw_jobs), max_pages * 10)
-        raw_jobs = raw_jobs[:max_detail_fetches]
+        # GraphQL response returns many jobs; apply pagination by slicing.
+        page_start = max(0, (page - 1) * limit)
+        page_end = page_start + limit
+
+        # Limit how many detail pages we fetch to avoid overloading.
+        # First slice to the requested window, then cap detail fetches.
+        sliced_jobs = raw_jobs[page_start:page_end]
+        max_detail_fetches = min(len(sliced_jobs), max_pages * 10)
+        raw_jobs = sliced_jobs[:max_detail_fetches]
+
 
         # Step 3: Fetch job details concurrently in small batches
         async def _enrich(raw_job: dict[str, Any]) -> dict[str, Any] | None:
@@ -220,5 +237,7 @@ async def fetch_meta_jobs(keyword: str = "Software", location: str = "", max_pag
             if i + 5 < len(raw_jobs):
                 await asyncio.sleep(0.3)
 
-    return jobs
+    # Apply final limit for API-level pagination
+    return jobs[:limit]
+
 

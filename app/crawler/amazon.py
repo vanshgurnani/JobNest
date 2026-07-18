@@ -8,13 +8,25 @@ from app.crawler.base import normalize_job_payload, request_json_with_retries
 logger = logging.getLogger(__name__)
 
 
-async def fetch_amazon_jobs(keyword: str = 'Software', location: str = 'Bangalore', max_pages: int = 3) -> list[dict[str, Any]]:
+async def fetch_amazon_jobs(
+    keyword: str = 'Software',
+    location: str = 'Bangalore',
+    max_pages: int = 3,
+    page: int = 1,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     base_url = 'https://www.amazon.jobs/en/search.json'
 
-    for page in range(1, max_pages + 1):
+    # Amazon paging is 1-indexed.
+    start_page = max(1, page)
+    pages_to_fetch = max(1, min(max_pages, (limit + 19) // 20))
+
+    for amazon_page in range(start_page, start_page + pages_to_fetch):
+
         try:
-            search_url = f"{base_url}?base_query={quote(keyword)}&loc_query={quote(location)}&page={page}&result_limit=20"
+            search_url = f"{base_url}?base_query={quote(keyword)}&loc_query={quote(location)}&page={amazon_page}&result_limit=20"
+
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'application/json',
@@ -72,9 +84,13 @@ async def fetch_amazon_jobs(keyword: str = 'Software', location: str = 'Bangalor
             if len(raw_jobs) < 20:
                 break
                 
+            # keep small delay between pages
             await asyncio.sleep(0.2)
         except Exception as exc:
+
             logger.warning('Amazon crawler failed: %s', exc)
             break
 
-    return jobs
+    # Apply final limit for API-level pagination
+    return jobs[:limit]
+

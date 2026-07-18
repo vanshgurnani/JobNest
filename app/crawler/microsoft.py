@@ -65,7 +65,15 @@ async def _fetch_position_insights(client: httpx.AsyncClient, position_id: int) 
         return []
 
 
-async def fetch_microsoft_jobs(keyword: str = "software", location: str = "", max_pages: int = 2) -> list[dict[str, Any]]:
+async def fetch_microsoft_jobs(
+    keyword: str = "software",
+    location: str = "",
+    max_pages: int = 2,
+    page: int = 1,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+
+
     """
     Fetch Microsoft job listings using the internal PCSX JSON API discovered via
     Playwright network inspection. Each page returns up to 20 results; we paginate
@@ -81,9 +89,13 @@ async def fetch_microsoft_jobs(keyword: str = "software", location: str = "", ma
     page_size = 20
     seen_ids: set[int] = set()
 
+    # Microsoft paging is offset-based: start = page_idx * 20
+    start_page_idx = max(0, page - 1)
+
     async with httpx.AsyncClient(headers=_BASE_HEADERS, timeout=25.0, follow_redirects=True) as client:
-        for page_idx in range(max_pages):
+        for page_idx in range(start_page_idx, start_page_idx + max_pages):
             offset = page_idx * page_size
+
             try:
                 r = await client.get(
                     _SEARCH_URL,
@@ -178,4 +190,6 @@ async def fetch_microsoft_jobs(keyword: str = "software", location: str = "", ma
                 break
             await asyncio.sleep(0.3)
 
-    return jobs
+    # Apply final limit for API-level pagination
+    return jobs[:limit]
+

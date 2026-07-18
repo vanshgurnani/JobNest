@@ -66,6 +66,9 @@ Aggregates jobs across all supported companies.
 - `company`: if provided, crawls only that company (e.g. `amazon`)
 - `keyword`: overrides default query keyword used by that company crawler
 - `location`: overrides default location used by that company crawler
+- `page`: 1-indexed pagination page (default: `1`)
+- `limit`: number of jobs to return for the page (default: `20`, max: `100`)
+
 
 **Response format**
 ```json
@@ -84,6 +87,9 @@ Crawls a single company.
 
 **Query params (optional):**
 - `keyword`, `location`
+- `page`: 1-indexed pagination page (default: `1`)
+- `limit`: number of jobs to return for the page (default: `20`, max: `100`)
+
 
 **Response format**
 ```json

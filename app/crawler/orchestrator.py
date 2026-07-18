@@ -37,16 +37,20 @@ async def _safe_crawl(
     fetch_fn: Callable[..., Coroutine[Any, Any, list[dict[str, Any]]]],
     keyword: str,
     location: str,
+    page: int,
+    limit: int,
 ) -> dict[str, Any]:
     """
+
     Wraps a single company crawler with independent error handling.
     If this company fails, it returns a failure dict instead of propagating.
     All other companies are unaffected.
     """
     try:
-        jobs = await fetch_fn(keyword=keyword, location=location)
+        jobs = await fetch_fn(keyword=keyword, location=location, page=page, limit=limit)
         return {"company": name.title(), "status": "ok", "jobs": _enrich_jobs(jobs)}
     except Exception as exc:
+
         logger.error("Crawler for %s failed: %s", name, exc, exc_info=True)
         return {"company": name.title(), "status": "failed", "error": str(exc), "jobs": []}
 
@@ -55,8 +59,11 @@ async def crawl_jobs(
     company: Optional[str] = None,
     keyword: Optional[str] = None,
     location: Optional[str] = None,
+    page: int = 1,
+    limit: int = 20,
 ) -> list[dict[str, Any]]:
     """
+
     Orchestrates all company crawlers concurrently. Each crawler is isolated —
     a failure in one does NOT affect results from others.
 
@@ -85,19 +92,26 @@ async def crawl_jobs(
             fetch_fn,
             keyword or default_kw,
             location or default_loc,
+            page,
+            limit,
         )
+
         return [result]
 
     # Crawl all companies concurrently, failures are isolated per company
+
     tasks = [
         _safe_crawl(
             name,
             fetch_fn,
             keyword or default_kw,
             location or default_loc,
+            page,
+            limit,
         )
         for name, (fetch_fn, default_kw, default_loc) in _REGISTRY.items()
     ]
+
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     output: list[dict[str, Any]] = []
