@@ -152,15 +152,17 @@ Key responsibilities:
 - Normalizes into common schema.
 
 ### Meta: `app/crawler/meta.py`
-- Step 1: `GET https://www.metacareers.com/jobsearch/`
-  - extracts an embedded **LSD token**
-- Step 2: `POST https://www.metacareers.com/graphql`
-  - uses `doc_id = 27129360303422352`
-  - critical detail: `results_per_page` **must be null**
-- Step 3: for each returned job id:
-  - fetches job detail page
-  - parses **Schema.org JobPosting JSON-LD** to extract description and related fields
-- Normalizes each job into common schema.
+- Step 1: Open `https://www.metacareers.com/jobsearch/` in Playwright.
+- Step 2: Intercept **GraphQL** network responses and collect job nodes from known response paths.
+  - Client-side de-duplication is done using `seen_ids`.
+- Step 3: Scroll until enough GraphQL results are collected for the requested `page`/`limit`.
+  - Pagination is applied by slicing the collected GraphQL results:
+    `start=(page-1)*limit`, `raw_jobs[start:start+limit]`.
+- Step 4: Normalize each selected job into the common schema via `normalize_job_payload(...)`.
+
+Notes:
+- `keyword` / `location` filtering is applied client-side in the crawler after GraphQL capture (since intercepted payloads can vary by locale/experiments).
+
 
 ---
 
