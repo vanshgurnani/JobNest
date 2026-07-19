@@ -196,7 +196,37 @@ pytest -q
 
 ---
 
+## Backend Flow (End-to-End)
+
+1. **HTTP request** hits one of the routes in `app/api/jobs.py`:
+   - `GET /health`
+   - `GET /jobs`
+   - `GET /jobs/{company}`
+2. The route calls `crawl_jobs(...)` from `app/crawler/orchestrator.py`, forwarding:
+   - `company`, `company_url`
+   - `keyword`, `location`
+   - `page`, `limit`
+3. The **orchestrator** decides which crawler(s) to run:
+   - If `company_url` is provided but `company` is not, it infers a company name from the URL and uses the universal crawler.
+   - If `company` is one of the dedicated crawlers (`amazon`, `microsoft`, `meta`), it runs that crawler.
+   - If `company` is unknown, it uses the universal fallback/ATS-based approach.
+   - When `company` is not provided, it runs supported crawlers **concurrently** via `asyncio.gather`.
+   - Each company crawl is wrapped by `_safe_crawl()` so failures are isolated per company.
+4. Each company crawler fetches raw job data and returns **normalized** job dicts using shared helpers in `app/crawler/base.py`.
+5. After crawling, the orchestrator enriches the normalized jobs:
+   - `_enrich_jobs()` uses `app/services/ai_parser.py` to backfill `skills` / `experience` from the job title when missing.
+6. Pagination semantics:
+   - The API passes `page` and `limit` into each crawler.
+   - Crawler implementations apply pagination when possible; for Meta, the Playwright-collect-then-slice approach is used (`start=(page-1)*limit`, `raw_jobs[start:start+limit]`).
+7. The API returns:
+   - aggregated results for `GET /jobs` (`total`, `latest_jobs`, `jobs`, plus `page`/`limit`)
+   - a single company’s result set for `GET /jobs/{company}` (`company`, `total`, `jobs`, plus `page`/`limit`).
+
+
+---
+
 ## Local Setup / Run
+
 
 ```bash
 cd /Users/vansh-gurnani/Desktop/job
@@ -208,6 +238,12 @@ Open:
 - http://localhost:8000/health
 - http://localhost:8000/jobs
 - http://localhost:8000/jobs/amazon
+
+Run tests:
+```bash
+PYTHONPATH=. pytest -q
+```
+
 
 ---
 
