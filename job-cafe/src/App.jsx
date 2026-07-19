@@ -51,7 +51,10 @@ export default function App() {
       }
 
       const data = await res.json();
-      setJobs(Array.isArray(data?.jobs) ? data.jobs : []);
+      // Backend returns: { jobs: [...], latest_jobs: [...], total: ... }
+      // Some deployments may return array directly; handle both.
+      const incoming = Array.isArray(data) ? data : data?.jobs;
+      setJobs(Array.isArray(incoming) ? incoming : []);
     } catch (e) {
       setJobs([]);
       setError(e?.message || 'Failed to fetch jobs');

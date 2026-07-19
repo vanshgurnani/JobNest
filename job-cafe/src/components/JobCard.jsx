@@ -8,7 +8,8 @@ function truncate(text, max = 140) {
 }
 
 export default function JobCard({ job }) {
-  const applyHref = job?.url || '';
+  // Backend schema uses apply_url. Keep fallback to url if present.
+  const applyHref = job?.apply_url || job?.url || '';
 
   const description = useMemo(() => truncate(job?.description, 160), [job]);
 
