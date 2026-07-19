@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Callable, Coroutine, Optional
+from urllib.parse import urlparse
 
 from app.crawler.amazon import fetch_amazon_jobs
 from app.crawler.meta import fetch_meta_jobs
@@ -17,6 +18,41 @@ _REGISTRY: dict[str, tuple[Callable[..., Coroutine[Any, Any, list[dict[str, Any]
     "microsoft": (fetch_microsoft_jobs, "software", ""),
     "meta": (fetch_meta_jobs, "Software", ""),
 }
+
+
+def _company_name_from_url(company_url: str) -> str:
+    parsed = urlparse(company_url if company_url.startswith("http") else f"https://{company_url}")
+    host = parsed.netloc.lower().removeprefix("www.")
+    labels = [label for label in host.split(".") if label and label not in {"careers", "jobs", "apply"}]
+    if not labels:
+        return "company"
+    return labels[0].replace("-", " ")
+
+
+async def _crawl_universal(
+    *,
+    company_name: str,
+    company_url: Optional[str],
+    keyword: Optional[str],
+    location: Optional[str],
+    page: int,
+    limit: int,
+) -> dict[str, Any]:
+    from app.crawler.universal import universal_crawl_jobs
+
+    try:
+        jobs = await universal_crawl_jobs(
+            company_name=company_name,
+            company_url=company_url,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+        )
+        return {"company": company_name.title(), "status": "ok", "jobs": _enrich_jobs(jobs)}
+    except Exception as exc:
+        logger.error("Universal crawler for %s failed: %s", company_name, exc, exc_info=True)
+        return {"company": company_name.title(), "status": "failed", "error": str(exc), "jobs": []}
 
 
 def _enrich_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -57,6 +93,7 @@ async def _safe_crawl(
 
 async def crawl_jobs(
     company: Optional[str] = None,
+    company_url: Optional[str] = None,
     keyword: Optional[str] = None,
     location: Optional[str] = None,
     page: int = 1,
@@ -79,13 +116,33 @@ async def crawl_jobs(
           - jobs: list of normalized job dicts
           - error: only present when status == "failed"
     """
+    if company_url and not company:
+        inferred_company = _company_name_from_url(company_url)
+        return [
+            await _crawl_universal(
+                company_name=inferred_company,
+                company_url=company_url,
+                keyword=keyword,
+                location=location,
+                page=page,
+                limit=limit,
+            )
+        ]
+
     if company:
         company_key = company.lower()
         if company_key not in _REGISTRY:
-            raise ValueError(
-                f"Unsupported company: '{company}'. "
-                f"Supported: {', '.join(_REGISTRY.keys())}"
-            )
+            return [
+                await _crawl_universal(
+                    company_name=company,
+                    company_url=company_url,
+                    keyword=keyword,
+                    location=location,
+                    page=page,
+                    limit=limit,
+                )
+            ]
+
         fetch_fn, default_kw, default_loc = _REGISTRY[company_key]
         result = await _safe_crawl(
             company_key,

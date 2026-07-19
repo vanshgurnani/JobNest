@@ -13,7 +13,7 @@ A lightweight **FastAPI** backend that fetches real-time job data for **Amazon, 
 ## Features
 
 - `GET /jobs` returns aggregated job results across supported companies
-- `GET /jobs/{company}` returns results for a single company
+- `GET /jobs/{company}` returns results for a single company; unsupported companies use the universal fallback crawler
 - Concurrent orchestrator with per-company error isolation
 - Normalization into a common schema:
   - company, job_id, title, location, description, skills, employment_type, experience, apply_url, source
@@ -64,6 +64,7 @@ Aggregates jobs across all supported companies.
 
 **Query params (optional):**
 - `company`: if provided, crawls only that company (e.g. `amazon`)
+- `company_url`: optional official company careers/base URL for unsupported companies
 - `keyword`: overrides default query keyword used by that company crawler
 - `location`: overrides default location used by that company crawler
 - `page`: 1-indexed pagination page (default: `1`)
@@ -83,9 +84,10 @@ Aggregates jobs across all supported companies.
 Crawls a single company.
 
 **Path params**
-- `company`: one of `amazon`, `microsoft`, `meta` (case-insensitive)
+- `company`: any company name. `amazon`, `microsoft`, and `meta` use dedicated crawlers; others use the universal fallback.
 
 **Query params (optional):**
+- `company_url`: optional official company careers/base URL for unsupported companies
 - `keyword`, `location`
 - `page`: 1-indexed pagination page (default: `1`)
 - `limit`: number of jobs to return for the page (default: `20`, max: `100`)
@@ -110,6 +112,10 @@ Crawls a single company.
   - `meta` → `fetch_meta_jobs`
 - If `company` is provided:
   - runs only that crawler
+- If `company` is not in the registry:
+  - resolves an official careers page or uses `company_url`
+  - detects Greenhouse, Lever, Workday, SmartRecruiters, and Ashby
+  - falls back through JSON APIs, embedded JSON, HTML job links, and JSON-LD JobPosting data
 - Otherwise:
   - runs all crawlers concurrently via `asyncio.gather`
   - failures are isolated per company using `_safe_crawl()`
@@ -238,4 +244,3 @@ Then open:
 - `app/crawler/base.py` – HTTP helpers + normalization
 - `app/services/ai_parser.py` – heuristic parsing
 - `tests/test_crawlers.py` – unit test
-
