@@ -80,6 +80,9 @@ _KNOWN_COMPANY_CAREERS_URLS = {
     "mastercard": "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers",
     "tcs": "https://www.tcs.com/careers",
     "wipro": "https://careers.wipro.com/careers-home/jobs",
+    "kpmg jp morgan": "",
+    "kpmg": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
+    "kpmg jp": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
     "zoho": "https://www.zoho.com/careers/",
 }
 
