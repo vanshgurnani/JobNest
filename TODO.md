@@ -1,11 +1,23 @@
-- [x] Update API: add pagination params (e.g., page/limit) for /jobs and /jobs/{company}
+# TODO - Job Search UI (MUI premium)
 
-- [x] Update crawler functions to accept pagination (page/limit) and apply offset/limit correctly
+- [x] Inspect existing React app (App.jsx, SearchBar.jsx, JobCard.jsx, styles.css)
+- [ ] Add MUI v5 dependencies (+ optional framer-motion)
+- [x] Create custom MUI dark theme (theme.js)
+- [x] Wrap app with ThemeProvider + CssBaseline (main.jsx)
 
-- [x] Fix location filtering for Meta + Microsoft: ensure location query is passed into their search payload/GraphQL variables and actually used
+- [x] Replace SearchBar with MUI glass/pill search UI
 
-- [x] Update README to document pagination and location filtering behavior
+- [x] Replace JobCard with MUI premium cards + hover + ellipsis
 
-- [x] Run tests (`pytest -q`) and basic smoke-check by calling API endpoints (added PYTHONPATH=. for tests)
+
+- [x] Replace App layout with MUI Grid + MUI Skeleton loading (6-8 cards)
+
+- [x] Ensure empty state message: “No jobs found. Try another company.”
+
+- [x] Add fade-in micro-interaction (framer-motion if installed)
+
+- [x] Clean up/stop relying on old CSS classes where possible
+
+- [x] Run npm install + dev build to verify
 
 

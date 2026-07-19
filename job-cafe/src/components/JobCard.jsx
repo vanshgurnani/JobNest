@@ -1,48 +1,96 @@
-import React, { useMemo } from 'react';
-
-function truncate(text, max = 140) {
-  if (!text) return '';
-  const s = String(text).trim();
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1).trimEnd() + '…';
-}
+import React from 'react';
+import { Box, Button, Card, CardContent, CardActions, Chip, Typography } from '@mui/material';
 
 export default function JobCard({ job }) {
-  // Backend schema uses apply_url. Keep fallback to url if present.
   const applyHref = job?.apply_url || job?.url || '';
 
-  const description = useMemo(() => truncate(job?.description, 160), [job]);
-
   return (
-    <article className="card">
-      <div className="card__body">
-        <h2 className="card__title">{job?.title || 'Untitled'}</h2>
+    <Card
+      elevation={0}
+      sx={{
+        backgroundColor: '#111827',
+        borderRadius: '16px',
+        border: '1px solid rgba(255,255,255,0.10)',
+        transition: 'transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease',
+        '&:hover': {
+          transform: 'translateY(-4px)',
+          boxShadow: '0 18px 45px rgba(0,0,0,0.35)',
+          borderColor: 'rgba(59,130,246,0.35)',
+        },
+      }}
+    >
+      <CardContent sx={{ p: 2.1 }}>
+        <Typography
+          variant="h6"
+          sx={{ fontWeight: 600, letterSpacing: '0.2px', color: 'text.primary' }}
+        >
+          {job?.title || 'Untitled'}
+        </Typography>
 
-        <div className="card__meta">
-          <div className="chip">
-            <span className="chip__label">Company</span>
-            <span className="chip__value">{job?.company || '-'}</span>
-          </div>
-          <div className="chip">
-            <span className="chip__label">Location</span>
-            <span className="chip__value">{job?.location || '-'}</span>
-          </div>
-        </div>
+        <Box sx={{ mt: 1.2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+          <Chip
+            size="small"
+            label={job?.company || '-'}
+            sx={{
+              borderRadius: 999,
+              backgroundColor: 'rgba(59,130,246,0.08)',
+              border: '1px solid rgba(59,130,246,0.25)',
+              '& .MuiChip-label': { color: 'text.primary', fontWeight: 520 },
+            }}
+          />
+          <Chip
+            size="small"
+            label={job?.location || '-'}
+            sx={{
+              borderRadius: 999,
+              backgroundColor: 'rgba(255,255,255,0.03)',
+              border: '1px solid rgba(255,255,255,0.10)',
+              '& .MuiChip-label': { color: 'text.secondary', fontWeight: 520 },
+            }}
+          />
+        </Box>
 
-        <p className="card__desc">{description}</p>
-      </div>
+        <Typography
+          sx={{
+            mt: 1.1,
+            color: 'text.secondary',
+            fontSize: 13.5,
+            lineHeight: 1.45,
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}
+        >
+          {job?.description || ''}
+        </Typography>
+      </CardContent>
 
-      <div className="card__footer">
-        <a
-          className="btn btn--primary"
+      <CardActions sx={{ p: 2.1, pt: 0 }}>
+        <Button
+          component="a"
           href={applyHref}
           target="_blank"
           rel="noreferrer"
+          variant="contained"
+          disableElevation
+          sx={{
+            borderRadius: 999,
+            bgcolor: 'primary.main',
+            py: 1,
+            px: 2.1,
+            fontWeight: 700,
+            '&:hover': {
+              bgcolor: 'primary.main',
+              filter: 'brightness(1.05)',
+            },
+          }}
         >
           Apply
-        </a>
-      </div>
-    </article>
+        </Button>
+      </CardActions>
+    </Card>
   );
 }
+
 

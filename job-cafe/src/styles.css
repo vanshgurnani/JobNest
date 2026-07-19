@@ -144,11 +144,131 @@ a {
   min-height: 220px;
 }
 
+/* Skeleton UI */
+.skeleton-wrap {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+@media (min-width: 720px) {
+  .skeleton-wrap {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.skeleton-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(15, 26, 47, 0.65);
+  padding: 14px;
+  overflow: hidden;
+  position: relative;
+}
+
+.skeleton-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -60%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+  transform: translateX(0);
+  animation: skeleton-shimmer 1.05s infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+.skeleton-line {
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  margin-bottom: 10px;
+}
+
+.skeleton-line--title {
+  width: 70%;
+  height: 14px;
+}
+
+.skeleton-line--meta {
+  width: 55%;
+}
+
+.skeleton-line--desc {
+  width: 95%;
+  height: 12px;
+}
+
+.skeleton-line--btn {
+  width: 35%;
+  height: 36px;
+  margin-top: 14px;
+  border-radius: 12px;
+}
+
+/* Trending / Suggestions */
+.trending {
+  margin: 14px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(15, 26, 47, 0.35);
+  padding: 14px;
+}
+
+.trending__title {
+  font-size: 13px;
+  color: rgba(230, 237, 247, 0.9);
+  margin-bottom: 10px;
+}
+
+.trending__list {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.suggestions {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.pill {
+  padding: 9px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(79, 140, 255, 0.55);
+  background: rgba(11, 18, 32, 0.6);
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.pill:hover {
+  filter: brightness(1.05);
+}
+
+.pill--ghost {
+  border-color: var(--border);
+  background: rgba(11, 18, 32, 0.25);
+}
+
 .grid {
   display: grid;
   grid-template-columns: 1fr;
   gap: 14px;
 }
+
 
 @media (min-width: 720px) {
   .grid {
