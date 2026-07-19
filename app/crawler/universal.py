@@ -75,16 +75,29 @@ _KNOWN_COMPANY_CAREERS_URLS = {
     "cognizant": "https://careers.cognizant.com/global-en/jobs/",
     "google": "https://www.google.com/about/careers/applications/jobs/results/",
     "infosys": "https://career.infosys.com/joblist",
+
+    # JPMorgan Chase / JP Morgan
     "jp morgan": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
     "jpmorgan": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
+    "j.p. morgan": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
+    "jpm": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
+
     "mastercard": "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers",
+
+    # TCA: frequently mistyped for TCS
     "tcs": "https://www.tcs.com/careers",
+    "tca": "https://www.tcs.com/careers",
+
+    # Wipro
     "wipro": "https://careers.wipro.com/careers-home/jobs",
-    "kpmg jp morgan": "",
+
+    # KPMG
     "kpmg": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
     "kpmg jp": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
+
     "zoho": "https://www.zoho.com/careers/",
 }
+
 
 
 # ---------- Generic helpers ----------
@@ -308,7 +321,13 @@ def _common_careers_candidates(company_name: str) -> list[str]:
     if not slug:
         return []
     normalized_name = _clean_text(company_name).lower()
+    # Try exact alias first, then slugified key.
     known_url = _KNOWN_COMPANY_CAREERS_URLS.get(normalized_name) or _KNOWN_COMPANY_CAREERS_URLS.get(slug)
+    # Some inputs include punctuation (e.g. "J.P. Morgan"), normalize by stripping dots.
+    if not known_url:
+        normalized_no_dots = normalized_name.replace(".", "")
+        known_url = _KNOWN_COMPANY_CAREERS_URLS.get(normalized_no_dots)
+
     candidates = [
         f"https://careers.{slug}.com",
         f"https://jobs.{slug}.com",
@@ -878,6 +897,7 @@ async def universal_crawl_jobs(
             # keep if location filter specified but can't detect; be conservative
             if j.get("location"):
                 continue
+
         if keyword:
             k = keyword.lower()
             if k not in (j.get("title", "") or "").lower() and k not in (j.get("description", "") or "").lower():
