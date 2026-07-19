@@ -11,6 +11,11 @@ __pycache__/
 *.pyo
 *.pyd
 
+# FastAPI / Starlette / Uvicorn runtime cache files (if present)
+.cache/
+.tmp/
+
+
 # Compiled extensions
 *.so
 
