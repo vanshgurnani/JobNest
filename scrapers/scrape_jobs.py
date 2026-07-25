@@ -4,14 +4,20 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
-# Ensure workspace root is on sys.path
+from bs4 import BeautifulSoup
+
+# Ensure workspace root is on sys.path (must be before local package imports)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scrapers.crawlers.base import request_with_retries
 
 from app.db.mongo import close_mongo, connect_mongo
 from app.schemas.job import canonicalize_job
@@ -48,6 +54,350 @@ def _format_jobs_preview(jobs: list[dict[str, Any]]) -> str:
     return json.dumps(preview, indent=2, ensure_ascii=False)
 
 
+def detect_ats(url: str, html: str = "") -> str | None:
+    searchable = f"{url}\n{html}"
+
+    _ATS_PATTERNS: list[tuple[str, str]] = [
+        ("greenhouse", r"boards\.greenhouse\.io"),
+        ("lever", r"jobs\.lever\.co"),
+        ("workday", r"myworkdayjobs\.com"),
+        ("smartrecruiters", r"smartrecruiters\.com"),
+        ("ashby", r"ashbyhq\.com"),
+    ]
+
+    for name, pattern in _ATS_PATTERNS:
+        if re.search(pattern, searchable, re.IGNORECASE):
+            return name
+    return None
+
+
+class GenericScraper:
+    def __init__(self, company: str = "") -> None:
+        self.company = company
+        self.logger = logging.getLogger("scrapers.scrape_jobs.GenericScraper")
+
+    async def fetch_jobs(
+        self,
+        url: str,
+        keyword: str | None = None,
+        location: str | None = None,
+        page: int = 1,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        html: str | None = None
+        try:
+            html = await request_with_retries(url)
+        except Exception as exc:
+            self.logger.warning("GenericScraper failed to fetch %s: %s", url, exc)
+            return []
+
+        # Lazy imports to avoid circular deps and keep universal.py untouched
+        from scrapers.crawlers.universal import (
+            _dedupe_jobs,
+            _extract_embedded_json,
+            _extract_jsonld_jobpostings,
+            _parse_jsonld_jobposting,
+        )
+        from scrapers.crawlers.base import extract_jobs_from_html
+
+        company_name = self.company or _company_name_from_url(url)
+        all_jobs: list[dict[str, Any]] = []
+        seen_titles: set[str] = set()
+
+        # 1 — JSON-LD (structured data, e.g. Apple, Google, etc.)
+        jsonld_items = _extract_jsonld_jobpostings(html)
+        for item in jsonld_items:
+            parsed = _parse_jsonld_jobposting(item)
+            title = (parsed.get("title") or "").strip()
+            if not title or title.lower() in seen_titles:
+                continue
+            seen_titles.add(title.lower())
+            all_jobs.append({
+                "title": title,
+                "company": parsed.get("company") or company_name.title(),
+                "location": parsed.get("location", ""),
+                "description": parsed.get("description", ""),
+                "apply_url": parsed.get("apply_url", url),
+                "url": parsed.get("apply_url", url),
+                "job_id": parsed.get("job_id", ""),
+                "posted_date": parsed.get("posted_date", ""),
+                "skills": [],
+                "employment_type": "",
+                "experience": "",
+                "source": "generic-jsonld",
+            })
+
+        # 2 — Embedded JSON (e.g. Next.js __NEXT_DATA__, Gatsby)
+        embedded_payloads = _extract_embedded_json(html)
+        for payload in embedded_payloads:
+            for candidate in _collect_job_candidates(payload):
+                title = (_pick(candidate, "title", "name", "jobTitle", "role") or "").strip()
+                if not title or not _looks_like_job_title(title):
+                    continue
+                if title.lower() in seen_titles:
+                    continue
+                seen_titles.add(title.lower())
+                all_jobs.append({
+                    "title": title,
+                    "company": company_name.title(),
+                    "location": (_pick(candidate, "location", "city", "workLocation") or ""),
+                    "description": (_pick(candidate, "description", "summary", "snippet") or ""),
+                    "apply_url": (_pick(candidate, "url", "applyUrl", "apply_url", "link") or url),
+                    "url": (_pick(candidate, "url", "applyUrl", "apply_url", "link") or url),
+                    "job_id": (_pick(candidate, "id", "jobId", "job_id", "uuid") or ""),
+                    "skills": (_pick(candidate, "skills", "technologies") or []),
+                    "employment_type": (_pick(candidate, "employmentType", "type", "workType") or ""),
+                    "experience": (_pick(candidate, "experience", "experienceLevel", "level") or ""),
+                    "source": "generic-embedded",
+                })
+
+        # 3 — Anchor links (catches <a> tags with job-like hrefs/text)
+        html_jobs = extract_jobs_from_html(html, company=company_name, base_url=url)
+        for j in html_jobs:
+            title = (j.get("title") or "").strip()
+            if not title or not _looks_like_job_title(title):
+                continue
+            if title.lower() in seen_titles:
+                continue
+            seen_titles.add(title.lower())
+            all_jobs.append({
+                "title": title,
+                "company": company_name.title(),
+                "location": j.get("location", ""),
+                "description": j.get("description", ""),
+                "apply_url": j.get("url", url),
+                "url": j.get("url", url),
+                "job_id": j.get("job_id", ""),
+                "skills": j.get("skills", []),
+                "employment_type": "",
+                "experience": "",
+                "source": "generic-anchor",
+            })
+
+        # 4 — BS4 heuristic (only if nothing found above)
+        if not all_jobs:
+            soup = BeautifulSoup(html, "lxml")
+            heuristic_seen: set[str] = set()
+
+            _JOB_TITLE_KEYWORDS = {
+                "engineer", "developer", "analyst", "manager", "designer",
+                "intern", "scientist", "specialist", "coordinator", "director",
+                "architect", "consultant", "associate", "lead", "head",
+                "vp", "vice president", "chief", "officer",
+            }
+            _SKIP_KEYWORDS = {"join", "search", "filter", "team", "culture", "life@", "sign in", "register", "submit"}
+
+            _JOB_PATH_PATTERN = re.compile(
+                r"/(?:job|career|position|requisition|opening|opportunity)s?\b",
+                re.IGNORECASE,
+            )
+
+            for tag in soup.find_all(["h1", "h2", "h3", "h4", "a"]):
+                text = tag.get_text(strip=True)
+                if not text or len(text) < 3 or len(text) > 200:
+                    continue
+
+                text_lower = text.lower()
+                if any(sk in text_lower for sk in _SKIP_KEYWORDS):
+                    continue
+                if text_lower in heuristic_seen:
+                    continue
+
+                href = (tag.get("href") or "") if tag.name == "a" else ""
+                if not href:
+                    parent = tag.find_parent("a")
+                    if parent:
+                        href = parent.get("href", "") or ""
+
+                is_job_link = bool(_JOB_PATH_PATTERN.search(href))
+                has_job_keyword = any(kw in text_lower for kw in _JOB_TITLE_KEYWORDS)
+
+                if not is_job_link and not has_job_keyword:
+                    continue
+
+                heuristic_seen.add(text_lower)
+                full_url = urljoin(url, href) if href else url
+
+                location_text = ""
+                for sibling in tag.find_next_siblings():
+                    sibling_text = sibling.get_text(strip=True)
+                    if not sibling_text or len(sibling_text) > 150:
+                        break
+                    if re.search(r"[A-Z][a-z]+(?:[\s,]+[A-Z][a-z]+)*(?:,\s*[A-Z]{2,})?", sibling_text) or "remote" in sibling_text.lower():
+                        location_text = sibling_text[:100]
+                        break
+
+                all_jobs.append({
+                    "title": text[:200],
+                    "company": company_name.title(),
+                    "location": location_text,
+                    "description": "",
+                    "skills": [],
+                    "employment_type": "",
+                    "experience": "",
+                    "apply_url": full_url,
+                    "url": full_url,
+                    "job_id": "",
+                    "source": "generic-heuristic",
+                })
+
+        return _slice_and_filter(all_jobs, keyword, location, page, limit)
+
+
+def _looks_like_job_title(text: str) -> bool:
+    if len(text) < 5:
+        return False
+    if " " not in text.strip():
+        return False
+    if re.match(r"^[a-z]+(?:[-_][a-z]+)+$", text):
+        return False
+    if re.match(r"^[a-z][a-z0-9]*(?:[A-Z][a-z0-9]*)+$", text):
+        return False
+    _NAV_PATTERNS = [
+        r"^(jobs|careers|work|life|explore)\s+(at|with|@)\s",
+        r"^explore\s+(work|life)\s+at\s",
+        r"^(quick|suggested)\s+(links|searches|pages)",
+        r"career\s+opportunities?$",
+        r"recycling\s+program(me)?$",
+        r"apple\s+retail$",
+        r"see\s+full\s+role\s+description",
+        r"^shared\s+values$",
+    ]
+    lower = text.lower().strip()
+    for pat in _NAV_PATTERNS:
+        if re.match(pat, lower):
+            return False
+    return True
+
+
+def _collect_job_candidates(payload: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        if any(key in payload for key in ("title", "name", "jobTitle", "role", "description", "location", "url")):
+            candidates.append(payload)
+        for value in payload.values():
+            candidates.extend(_collect_job_candidates(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            candidates.extend(_collect_job_candidates(item))
+    return candidates
+
+
+def _pick(obj: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        val = obj.get(key)
+        if val is not None:
+            return val
+    return ""
+
+
+def _slice_and_filter(
+    jobs: list[dict[str, Any]],
+    keyword: str | None,
+    location: str | None,
+    page: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if keyword:
+        kw = keyword.lower()
+        jobs = [j for j in jobs if kw in j.get("title", "").lower() or kw in j.get("description", "").lower()]
+    if location:
+        loc = location.lower()
+        jobs = [j for j in jobs if not j.get("location") or loc in j["location"].lower()]
+    start = max(page - 1, 0) * limit
+    return jobs[start : start + limit]
+
+
+def _company_name_from_url(url: str) -> str:
+    parsed = urlparse(url if url.startswith("http") else f"https://{url}")
+    host = parsed.netloc.lower().removeprefix("www.")
+    labels = [
+        label for label in host.split(".")
+        if label and label not in {"careers", "jobs", "apply"}
+    ]
+    return (labels[0].replace("-", " ")) if labels else "company"
+
+
+class _CompanyScraper:
+    def __init__(self, company: str) -> None:
+        self.company = company
+        self.logger = LOGGER
+
+    async def fetch_jobs(
+        self,
+        url: str | None = None,
+        keyword: str | None = None,
+        location: str | None = None,
+        page: int = 1,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        from scrapers.crawlers.orchestrator import crawl_jobs
+
+        results = await crawl_jobs(
+            company=self.company,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+        )
+        jobs: list[dict[str, Any]] = []
+        for result in results:
+            if result.get("status") == "ok":
+                jobs.extend(result.get("jobs", []))
+        return jobs
+
+
+class _ATSScraper:
+    def __init__(self, ats: str, company: str) -> None:
+        self.ats = ats
+        self.company = company
+        self.logger = LOGGER
+
+    async def fetch_jobs(
+        self,
+        url: str | None = None,
+        keyword: str | None = None,
+        location: str | None = None,
+        page: int = 1,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        from scrapers.crawlers.base import crawl_ats_jobs, detect_ats as detect_ats_impl
+
+        ats_info = detect_ats_impl(url or "", "")
+        if not ats_info:
+            self.logger.warning("ATS scraper could not detect ATS info for %s", url)
+            return []
+
+        jobs = await crawl_ats_jobs(
+            ats_info,
+            company=self.company,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+        )
+        return jobs
+
+
+def route_scraper(url: str, html: str = "") -> GenericScraper | None:
+    from scrapers.crawlers.orchestrator import _REGISTRY
+
+    company_name = _company_name_from_url(url)
+    company_key = company_name.lower()
+
+    if company_key in _REGISTRY:
+        LOGGER.info("[INFO] Using scraper: %s (company-specific)", company_name)
+        return _CompanyScraper(company_key)
+
+    ats = detect_ats(url, html)
+    if ats:
+        LOGGER.info("[INFO] Using scraper: %s (ATS)", ats)
+        return _ATSScraper(ats, company_name)
+
+    LOGGER.info("[INFO] Using scraper: generic")
+    return GenericScraper(company=company_name)
+
+
 async def _scrape_company(
     company: str | None,
     *,
@@ -57,21 +407,59 @@ async def _scrape_company(
     pages: int,
     page_size: int,
     delay_seconds: float,
+    generic_only: bool = False,
 ) -> list[dict[str, Any]]:
     all_jobs: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     label = company_url or company or "unknown"
 
+    _scraper: GenericScraper | None = None
+    if company_url and not company:
+        if generic_only:
+            company_name = _company_name_from_url(company_url)
+            LOGGER.info("[INFO] Using scraper: generic (forced)")
+            _scraper = GenericScraper(company=company_name)
+        else:
+            _scraper = route_scraper(company_url)
+
     for page in range(1, pages + 1):
         LOGGER.info("[SCRAPE] Fetching target='%s' page=%d limit=%d", label, page, page_size)
-        results = await crawl_jobs(
-            company=company,
-            company_url=company_url,
-            keyword=keyword,
-            location=location,
-            page=page,
-            limit=page_size,
-        )
+
+        if _scraper is not None:
+            try:
+                raw_jobs = await _scraper.fetch_jobs(
+                    url=company_url,
+                    keyword=keyword,
+                    location=location,
+                    page=page,
+                    limit=page_size,
+                )
+                results = [{"status": "ok", "jobs": raw_jobs, "company": label}]
+            except Exception as exc:
+                LOGGER.warning(
+                    "[SCRAPE] Router scraper failed for '%s' page=%d: %s. Falling back to default.",
+                    label,
+                    page,
+                    exc,
+                )
+                _scraper = None
+                results = await crawl_jobs(
+                    company=company,
+                    company_url=company_url,
+                    keyword=keyword,
+                    location=location,
+                    page=page,
+                    limit=page_size,
+                )
+        else:
+            results = await crawl_jobs(
+                company=company,
+                company_url=company_url,
+                keyword=keyword,
+                location=location,
+                page=page,
+                limit=page_size,
+            )
 
         page_jobs: list[dict[str, Any]] = []
         for result in results:
@@ -105,8 +493,12 @@ async def _scrape_company(
 
 
 async def _run(args: argparse.Namespace) -> None:
-    companies = _parse_company_list(args.companies)
+    generic_only = getattr(args, "generic_only", False)
+    companies = [] if generic_only else _parse_company_list(args.companies)
     urls = _parse_url_list(args.company_url)
+
+    if generic_only and not urls:
+        raise SystemExit("--generic-only requires --company-url.")
 
     if not companies and not urls:
         raise SystemExit("No companies or company URLs selected for scraping.")
@@ -117,7 +509,7 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     LOGGER.info("=" * 60)
-    LOGGER.info("STARTING JOB SCRAPER | Mode: %s", args.mode.upper())
+    LOGGER.info("STARTING JOB SCRAPER | Mode: %s | Generic-only: %s", args.mode.upper(), generic_only)
     if companies:
         LOGGER.info("Target Companies: %s", ", ".join(companies))
     if urls:
@@ -163,6 +555,7 @@ async def _run(args: argparse.Namespace) -> None:
                 pages=args.pages,
                 page_size=args.page_size,
                 delay_seconds=args.delay_seconds,
+                generic_only=generic_only,
             )
             total_scraped += len(jobs)
             all_collected_jobs.extend(jobs)
@@ -201,6 +594,7 @@ def main() -> None:
     parser.add_argument("--pages", type=int, default=2, help="Number of pages to scrape per company.")
     parser.add_argument("--page-size", type=int, default=20, help="Number of items per page.")
     parser.add_argument("--delay-seconds", type=float, default=0.5, help="Delay between page/company requests in seconds (CPU protection).")
+    parser.add_argument("--generic-only", action="store_true", help="Skip registered companies; scrape provided URLs with the generic fallback scraper only.")
 
     args = parser.parse_args()
     asyncio.run(_run(args))

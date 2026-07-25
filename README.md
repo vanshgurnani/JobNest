@@ -8,6 +8,8 @@ Job hunting today means checking 20+ career sites, each with different UX, filte
 
 - **Unified schema** — every job, from any company or ATS, stored in a consistent format
 - **ATS-aware scraping** — automatically detects and adapts to Lever, Greenhouse, Workday, Ashby, SmartRecruiters, and custom career portals
+- **Dynamic generic scraper** — cascading extraction pipeline (JSON-LD → embedded JSON → anchor analysis → BS4 heuristic) for any company without a dedicated crawler
+- **Intelligent routing** — automatically selects company-specific → ATS → generic fallback per URL
 - **Company-specific crawlers** — optimized scrapers for Amazon, Microsoft, and Meta that use their internal APIs
 - **Intelligent parsing** — extracts role, skills, and experience level from raw titles and descriptions
 - **Dual mode** — preview scraped jobs locally or persist to MongoDB
@@ -84,6 +86,12 @@ python scrapers/scrape_jobs.py --mode local --companies amazon,microsoft --pages
 
 ```bash
 python scrapers/scrape_jobs.py --mode local --company-url "https://careers.google.com"
+```
+
+### Scrape with Generic-Only Mode (Skip Registered Crawlers)
+
+```bash
+python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https://jobs.apple.com/en-in/search"
 ```
 
 ### Scrape Jobs (Store to MongoDB)
@@ -175,7 +183,7 @@ docker compose --profile tools run scraper
 | Workday shops | Universal ATS detection + HTML parsing |
 | Ashby shops | Universal ATS detection + API |
 | SmartRecruiters | Universal ATS detection + API |
-| Any other career portal | Universal fallback (JSON-LD, anchor analysis, embedded JSON) |
+| Any other career portal | Dynamic generic scraper (JSON-LD → embedded JSON → anchor links → BS4 heuristic) |
 
 ## Project Structure
 

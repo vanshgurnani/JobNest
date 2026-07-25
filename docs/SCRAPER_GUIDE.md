@@ -14,7 +14,7 @@ The scraper engine is a **Playwright-free** job scraping system that runs indepe
 
 ```
 scrapers/
-  scrape_jobs.py         # CLI entry point
+  scrape_jobs.py         # CLI entry point (+ routing layer, ATS detection, GenericScraper)
   crawlers/
     __init__.py
     orchestrator.py      # Crawler registry and dispatcher
@@ -69,7 +69,11 @@ python scrapers/scrape_jobs.py --mode db --companies microsoft --keyword enginee
 
 ### URL-Based Scraping (Bypass Company Name Lookup)
 
-Scrape any company by its career page URL. The universal ATS-aware crawler automatically detects Lever, Greenhouse, Workday, Ashby, SmartRecruiters, or falls back to HTML/JSON-LD extraction.
+Scrape any company by its career page URL. The system uses a **smart routing layer** (`route_scraper`) that automatically selects the best strategy:
+
+1. **Company-specific** — if the URL's domain matches a registered crawler (amazon, microsoft, meta)
+2. **ATS-aware** — if the URL/HTML contains Lever, Greenhouse, Workday, Ashby, or SmartRecruiters markers
+3. **Generic fallback** — dynamic extraction pipeline for any other site
 
 ```bash
 # Scrape a single career page URL
@@ -82,27 +86,80 @@ python scrapers/scrape_jobs.py --mode db --company-url "https://careers.google.c
 python scrapers/scrape_jobs.py --mode db --companies amazon --company-url "https://careers.google.com"
 ```
 
+### Generic-Only Mode (Skip Registered Crawlers)
+
+Bypass the routing layer entirely and force the generic dynamic scraper. Useful for testing unknown sites or avoiding registered crawlers.
+
+```bash
+# Scrape Apple with generic scraper only (no company-specific or ATS routing)
+python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https://jobs.apple.com/en-in/search?location=india-INDC&key=software"
+
+# Multiple URLs in generic-only mode
+python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https://jobs.apple.com,https://company-site.com/careers"
+```
+
+The generic-only mode:
+- Skips all registered company scrapers (amazon, meta, microsoft)
+- Forces the GenericScraper cascade regardless of URL patterns
+- Requires `--company-url` (exits with an error if omitted)
+- Logs `[INFO] Using scraper: generic (forced)` per URL
+
 ### All CLI Options
 
 | Argument | Default | Description |
-|---|---|---|
+|---|---|---|---|
 | `--mode` | `local` | `local` or `db` |
 | `--companies` | `all` | Comma-separated slugs (e.g. `amazon,microsoft`) or `all` |
-| `--company-url` | `None` | Comma-separated career page URLs to scrape (bypasses company name lookup, uses universal crawler) |
+| `--company-url` | `None` | Comma-separated career page URLs to scrape (bypasses company name lookup, uses router) |
 | `--keyword` | `None` | Keyword filter passed to crawlers |
 | `--location` | `None` | Location filter passed to crawlers |
 | `--pages` | `2` | Pages per company |
 | `--page-size` | `20` | Items per page |
 | `--delay-seconds` | `0.5` | Delay between requests (CPU protection) |
+| `--generic-only` | `False` | Skip registered crawlers; force generic scraper on provided URLs |
 
 ## Supported Companies & Crawlers
 
-| Company | Crawler | Strategy |
-|---|---|---|
+| Target | Crawler | Strategy |
+|---|---|---|---|
 | Amazon | `amazon.py` | Amazon Jobs public `search.json` API |
 | Microsoft | `microsoft.py` | Microsoft PCSX API (search + position details + skills) |
 | Meta | `meta.py` | MetaCareers GraphQL API + HTML fallback |
-| Any other | `universal.py` | Multi-layer ATS detection and API discovery |
+| Lever / Greenhouse / Workday / Ashby / SmartRecruiters | `base.py` (`crawl_ats_jobs`) | ATS detection → platform-specific API calls |
+| Any other company (via `--company-url`) | Router → `scrape_jobs.py` (GenericScraper) | Route: company-specific → ATS → generic cascade |
+| Any company (via `--generic-only`) | `scrape_jobs.py` (GenericScraper) | Forced generic: JSON-LD → embedded JSON → anchor links → BS4 heuristic |
+
+## Smart Routing Layer
+
+The routing layer lives in `scrapers/scrape_jobs.py` and decides which scraper handles each URL:
+
+```
+route_scraper(url, html="")
+  │
+  ├─ 1. URL domain matches _REGISTRY (amazon, meta, microsoft)?
+  │      → _CompanyScraper (delegates to orchestrator)
+  │
+  ├─ 2. URL or HTML contains ATS markers?
+  │      → _ATSScraper (delegates to base.py ATS crawlers)
+  │
+  └─ 3. Fallback
+         → GenericScraper (dynamic extraction pipeline)
+```
+
+Every decision is logged: `[INFO] Using scraper: amazon (company-specific)` / `greenhouse (ATS)` / `generic`.
+
+When `--generic-only` is set, the router is bypassed entirely and `GenericScraper` is used directly.
+
+## GenericScraper Extraction Pipeline
+
+The `GenericScraper` (`scrape_jobs.py`) dynamically extracts jobs from any HTML page without a dedicated crawler. It runs a cascading pipeline that stops at the first successful method:
+
+1. **JSON-LD** — parses `application/ld+json` `<script>` tags containing `JobPosting` schema. Catches structured data used by Apple, Google, and others.
+2. **Embedded JSON** — extracts `__NEXT_DATA__` (Next.js), Gatsby, and inline JSON payloads. Filters candidates through `_looks_like_job_title()` to reject navigation labels, code identifiers, and single-word metadata.
+3. **Anchor links** — uses the existing `extract_jobs_from_html()` from `base.py` to find `<a>` tags with job-like hrefs (`/job`, `/career`, `/position`) or job-keyword text. Results are quality-filtered again through `_looks_like_job_title()`.
+4. **BS4 heuristic** — scans all `h1`-`h4` and `<a>` tags for job-title keywords (engineer, developer, manager, etc.), skipping navigation phrases ("join", "culture", "sign in"). Extracts nearby location text via sibling traversal.
+
+Each extracted job includes the inferred company name (from the URL host), the extraction source tag (`generic-jsonld`, `generic-embedded`, `generic-anchor`, `generic-heuristic`), and any discovered location text.
 
 ## How the Universal Crawler Works
 
@@ -138,6 +195,8 @@ Each job is normalized to this structure:
 
 ## Adding a New Company Crawler
 
+### Option A — Dedicated Crawler (for companies with custom APIs)
+
 1. Create `scrapers/crawlers/<company>.py`
 2. Implement an async function matching the signature:
    ```python
@@ -152,9 +211,27 @@ Each job is normalized to this structure:
 3. Register the crawler in `scrapers/crawlers/orchestrator.py`
 4. Return a list of job dicts with the standard schema fields
 
+### Option B — No Code Required (Dynamic Generic Scraper)
+
+For any company not in the registry, the routing layer automatically falls through to `GenericScraper`. No registration needed — it extracts jobs from:
+
+- **JSON-LD** structured data (`JobPosting` schema)
+- **Embedded JSON** (Next.js, Gatsby, inline scripts)
+- **Anchor links** with job-like URLs/text
+- **BS4 heuristic** scanning for job title keywords
+
+Test with `--generic-only` to force generic scraping:
+```bash
+python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https://company-site.com/careers"
+```
+
 ## Notes
 
 - Rate limiting is handled via `delay-seconds` argument
 - The scraper does NOT require MongoDB to be running in `local` mode
 - All HTTP requests include retry logic with exponential backoff
+- The routing layer logs which scraper was selected: `[INFO] Using scraper: amazon (company-specific)` / `greenhouse (ATS)` / `generic`
+- Use `--generic-only` to bypass the routing layer and force the generic scraper
+- The generic scraper extracts location text from sibling elements alongside job headings
+- Job quality filtering via `_looks_like_job_title()` rejects navigation labels, code identifiers, and single-word metadata
 - The universal crawler can handle companies not explicitly listed
