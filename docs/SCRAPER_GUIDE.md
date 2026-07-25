@@ -107,7 +107,7 @@ The generic-only mode:
 ### All CLI Options
 
 | Argument | Default | Description |
-|---|---|---|---|
+|---|---|---|
 | `--mode` | `local` | `local` or `db` |
 | `--companies` | `all` | Comma-separated slugs (e.g. `amazon,microsoft`) or `all` |
 | `--company-url` | `None` | Comma-separated career page URLs to scrape (bypasses company name lookup, uses router) |
@@ -121,7 +121,7 @@ The generic-only mode:
 ## Supported Companies & Crawlers
 
 | Target | Crawler | Strategy |
-|---|---|---|---|
+|---|---|---|
 | Amazon | `amazon.py` | Amazon Jobs public `search.json` API |
 | Microsoft | `microsoft.py` | Microsoft PCSX API (search + position details + skills) |
 | Meta | `meta.py` | MetaCareers GraphQL API + HTML fallback |
