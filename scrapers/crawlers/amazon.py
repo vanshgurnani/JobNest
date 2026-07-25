@@ -3,7 +3,8 @@ import asyncio
 import logging
 from typing import Any
 from urllib.parse import quote, urljoin
-from app.crawler.base import normalize_job_payload, request_json_with_retries
+
+from scrapers.crawlers.base import normalize_job_payload, request_json_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,6 @@ async def fetch_amazon_jobs(
     pages_to_fetch = max(1, min(max_pages, (limit + 19) // 20))
 
     for amazon_page in range(start_page, start_page + pages_to_fetch):
-
         try:
             search_url = f"{base_url}?base_query={quote(keyword)}&loc_query={quote(location)}&page={amazon_page}&result_limit=20"
 
@@ -34,35 +34,35 @@ async def fetch_amazon_jobs(
             data = await request_json_with_retries(search_url, headers=headers, timeout=25.0)
             if not data or 'jobs' not in data:
                 break
-            
+
             raw_jobs = data['jobs']
             if not raw_jobs:
                 break
-                
+
             for raw_job in raw_jobs:
                 job_id = raw_job.get('id') or ''
                 title = raw_job.get('title') or ''
-                
+
                 loc_parts = []
                 for key in ('city', 'state', 'country_code'):
                     val = raw_job.get(key)
                     if val:
                         loc_parts.append(val)
                 job_loc = ", ".join(loc_parts) if loc_parts else raw_job.get('location', location)
-                
+
                 desc = raw_job.get('description') or ''
                 basic = raw_job.get('basic_qualifications') or ''
                 pref = raw_job.get('preferred_qualifications') or ''
-                
+
                 full_desc = desc
                 if basic:
                     full_desc += f"\n\nBasic Qualifications:\n{basic}"
                 if pref:
                     full_desc += f"\n\nPreferred Qualifications:\n{pref}"
-                
+
                 apply_url = urljoin('https://www.amazon.jobs', raw_job.get('job_path') or '')
                 category = raw_job.get('job_category') or ''
-                
+
                 normalized = normalize_job_payload(
                     {
                         'job_id': job_id,
@@ -80,17 +80,13 @@ async def fetch_amazon_jobs(
                 )
                 if normalized.get('title'):
                     jobs.append(normalized)
-            
+
             if len(raw_jobs) < 20:
                 break
-                
-            # keep small delay between pages
+
             await asyncio.sleep(0.2)
         except Exception as exc:
-
             logger.warning('Amazon crawler failed: %s', exc)
             break
 
-    # Apply final limit for API-level pagination
     return jobs[:limit]
-

@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.crawler.base import normalize_job_payload, request_json_with_retries
+from scripts.scraping.crawlers.base import normalize_job_payload, request_json_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -192,4 +192,3 @@ async def fetch_microsoft_jobs(
 
     # Apply final limit for API-level pagination
     return jobs[:limit]
-

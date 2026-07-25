@@ -2,9 +2,9 @@ import asyncio
 
 import pytest
 
-from app.crawler.base import detect_ats, extract_jobs_from_html
-from app.crawler.orchestrator import crawl_jobs
-from app.crawler.universal import (
+from scrapers.crawlers.base import detect_ats, extract_jobs_from_html
+from scrapers.crawlers.orchestrator import crawl_jobs
+from scrapers.crawlers.universal import (
     _common_careers_candidates,
     _dedupe_jobs,
     _extract_candidate_api_urls,
@@ -125,7 +125,7 @@ def test_orchestrator_passes_company_url_to_universal(monkeypatch: pytest.Monkey
         captured.update(kwargs)
         return []
 
-    import app.crawler.universal as universal
+    import scrapers.crawlers.universal as universal
 
     monkeypatch.setattr(universal, "universal_crawl_jobs", fake_universal_crawl_jobs)
 
@@ -142,7 +142,7 @@ def test_company_url_without_company_uses_universal_not_registry(monkeypatch: py
         captured.update(kwargs)
         return [{"title": "Consultant", "company": "Accenture", "url": kwargs["company_url"]}]
 
-    import app.crawler.universal as universal
+    import scrapers.crawlers.universal as universal
 
     monkeypatch.setattr(universal, "universal_crawl_jobs", fake_universal_crawl_jobs)
 
@@ -232,7 +232,7 @@ def test_universal_crawl_fetch_failure_returns_empty(monkeypatch: pytest.MonkeyP
     async def fake_fetch_html(*args, **kwargs):
         raise RuntimeError("403 Forbidden")
 
-    import app.crawler.universal as universal
+    import scrapers.crawlers.universal as universal
 
     monkeypatch.setattr(universal, "_resolve_careers_page", fake_resolve)
     monkeypatch.setattr(universal, "_fetch_html", fake_fetch_html)

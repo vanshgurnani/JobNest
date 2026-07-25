@@ -1,8 +1,7 @@
 import asyncio
 from typing import Any
-from playwright.async_api import async_playwright
 
-from app.crawler.base import normalize_job_payload
+from scripts.scraping.crawlers.base import normalize_job_payload
 
 
 async def fetch_meta_jobs(
@@ -11,6 +10,13 @@ async def fetch_meta_jobs(
     page: int = 1,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Meta scraping requires Playwright. Install requirements-scraping.txt "
+            "and run the scraper with --include-browser."
+        ) from exc
 
     jobs_data = []
     seen_ids = set()

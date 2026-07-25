@@ -8,12 +8,18 @@ import {
   Paper,
   Chip,
   CircularProgress,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
 } from '@mui/material';
 
 import SearchBar from './components/SearchBar.jsx';
 import JobCard from './components/JobCard.jsx';
 
-const API_BASE = 'https://job-crawler-nkre.onrender.com';
+const API_BASE = import.meta.env.VITE_API_BASE || '';
+const PAGE_SIZE = 20;
 
 const COMPANY_ALIASES = {
   meta: 'facebook',
@@ -57,6 +63,9 @@ function mapBackendJobToUI(job) {
     id: job?.id,
     url: job?.url,
     description: job?.description,
+    skills: job?.skills || [],
+    employment_type: job?.employment_type || '',
+    experience: job?.experience || '',
   };
 }
 
@@ -68,6 +77,10 @@ export default function App() {
   const [jobs, setJobs] = useState([]);
   const [status, setStatus] = useState('loading'); // loading | success | retrying | empty
   const [message, setMessage] = useState('');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [selectedJob, setSelectedJob] = useState(null);
 
   const [filters, setFilters] = useState({
     company: '',
@@ -105,8 +118,8 @@ export default function App() {
     return scored;
   }, [normalizedCompany, trending]);
 
-  async function fetchJobsFromBackend({ company, keyword, location, signal }) {
-    const qs = buildQuery({ company, keyword, location, page: 1, limit: 20 });
+  async function fetchJobsFromBackend({ company, keyword, location, page: pageNumber, signal }) {
+    const qs = buildQuery({ company, keyword, location, page: pageNumber, limit: PAGE_SIZE });
     const url = `${API_BASE}/jobs${qs}`;
 
     const res = await fetch(url, {
@@ -125,19 +138,24 @@ export default function App() {
 
     return {
       jobs: normalized,
+      total: Number(data?.total || normalized.length),
+      page: Number(data?.page || pageNumber),
     };
   }
 
-  async function discover(companyInput) {
+  async function discover(companyInput, pageNumber = 1, { append = false } = {}) {
     const company = normalizeCompany(companyInput);
     const keyword = String(filters.keyword || '').trim();
     const location = String(filters.location || '').trim();
 
-    const cacheKey = JSON.stringify({ company, keyword, location });
+    const cacheKey = JSON.stringify({ company, keyword, location, page: pageNumber });
     const cached = cacheRef.current.get(cacheKey);
     if (cached && Date.now() - cached.at < 1000 * 60 * 10) {
-      setJobs(cached.jobs);
+      setJobs((prev) => (append ? [...prev, ...cached.jobs] : cached.jobs));
       setStatus(cached.status);
+      setPage(pageNumber);
+      setTotal(cached.total || cached.jobs.length);
+      setIsLoadingMore(false);
       setMessage('');
       return;
     }
@@ -147,9 +165,15 @@ export default function App() {
 
     const ctrl = new AbortController();
 
-    setStatus('loading');
+    if (append) {
+      setIsLoadingMore(true);
+    } else {
+      setStatus('loading');
+      setJobs([]);
+      setPage(1);
+      setTotal(0);
+    }
     setMessage('');
-    setJobs([]);
 
     const attempts = [];
     const aliasAttempt1 = company;
@@ -176,17 +200,26 @@ export default function App() {
           company: a.company,
           keyword: a.keyword,
           location: a.location,
+          page: pageNumber,
           signal: ctrl.signal,
         });
 
         if (rid !== requestIdRef.current) return;
 
-        const uiJobs = (result.jobs || []).slice(0, 20);
+        const uiJobs = (result.jobs || []).slice(0, PAGE_SIZE);
         if (uiJobs.length > 0) {
-          cacheRef.current.set(cacheKey, { jobs: uiJobs, status: 'success', at: Date.now() });
-          setJobs(uiJobs);
+          cacheRef.current.set(cacheKey, {
+            jobs: uiJobs,
+            status: 'success',
+            total: result.total,
+            at: Date.now(),
+          });
+          setJobs((prev) => (append ? [...prev, ...uiJobs] : uiJobs));
+          setPage(pageNumber);
+          setTotal(result.total);
           setStatus('success');
           setMessage('');
+          setIsLoadingMore(false);
           return;
         }
       } catch {
@@ -196,10 +229,16 @@ export default function App() {
 
     if (rid !== requestIdRef.current) return;
 
-    cacheRef.current.set(cacheKey, { jobs: [], status: 'empty', at: Date.now() });
-    setJobs([]);
-    setStatus('empty');
-    setMessage('No jobs found. Try another company.');
+    cacheRef.current.set(cacheKey, { jobs: [], status: append ? 'success' : 'empty', at: Date.now() });
+    if (append) {
+      setStatus('success');
+      setMessage('');
+    } else {
+      setJobs([]);
+      setStatus('empty');
+      setMessage('No jobs found. Try another company.');
+    }
+    setIsLoadingMore(false);
 
   }
 
@@ -223,10 +262,45 @@ export default function App() {
 
   function handleSearch() {
     if (!normalizedCompany) return;
-    discover(normalizedCompany);
+    discover(normalizedCompany, 1);
+  }
+
+  function handleLoadMore() {
+    if (!normalizedCompany || isLoadingMore) return;
+    discover(normalizedCompany, page + 1, { append: true });
+  }
+
+  function handlePageChange(nextPage) {
+    if (!normalizedCompany || isLoadingMore || nextPage < 1 || nextPage > totalPages) return;
+    window.scrollTo({ top: 120, behavior: 'smooth' });
+    discover(normalizedCompany, nextPage);
   }
 
   const showTrending = !normalizedCompany;
+  const canLoadMore = jobs.length > 0 && jobs.length < total;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const canPagePrevious = page > 1;
+  const canPageNext = page < totalPages;
+
+  // Generate visible page numbers for pagination toolbar
+  const visiblePages = useMemo(() => {
+    const pages = [];
+    const maxVisible = 5;
+    let start = Math.max(1, page - Math.floor(maxVisible / 2));
+    let end = Math.min(totalPages, start + maxVisible - 1);
+
+    if (end - start + 1 < maxVisible) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+
+    for (let p = start; p <= end; p++) {
+      pages.push(p);
+    }
+    return pages;
+  }, [page, totalPages]);
+
+  const startCount = (page - 1) * PAGE_SIZE + 1;
+  const endCount = Math.min(page * PAGE_SIZE, total);
 
   return (
     <Box sx={{ minHeight: '100vh' }}>
@@ -372,11 +446,119 @@ export default function App() {
               {jobs.map((job, idx) => (
                 <Grid item xs={12} md={6} key={job?.id || job?.url || job?.apply_url}>
                   <Box sx={{ animation: `fadeInUp 320ms ease ${idx * 60}ms both` }}>
-                    <JobCard job={job} />
+                    <JobCard job={job} onView={() => setSelectedJob(job)} />
                   </Box>
                 </Grid>
               ))}
             </Grid>
+          )}
+
+          {status === 'success' && jobs.length > 0 && (
+            <Box
+              sx={{
+                mt: 5,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 2,
+              }}
+            >
+              {total > 0 && (
+                <Typography sx={{ color: 'text.secondary', fontSize: 14, fontWeight: 700 }}>
+                  Showing {startCount}–{endCount} of {total} jobs
+                </Typography>
+              )}
+
+              <Box
+                sx={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 1,
+                  p: 1,
+                  borderRadius: 999,
+                  backgroundColor: 'rgba(17, 24, 39, 0.7)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  backdropFilter: 'blur(8px)',
+                }}
+              >
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => handlePageChange(page - 1)}
+                  disabled={!canPagePrevious || isLoadingMore}
+                  sx={{ borderRadius: 999, px: 2, py: 0.8, fontWeight: 800, minWidth: 90 }}
+                >
+                  Previous
+                </Button>
+
+                {visiblePages[0] > 1 && (
+                  <>
+                    <Button
+                      size="small"
+                      variant="text"
+                      onClick={() => handlePageChange(1)}
+                      sx={{ borderRadius: 999, minWidth: 36, height: 36, fontWeight: 800, color: 'text.secondary' }}
+                    >
+                      1
+                    </Button>
+                    {visiblePages[0] > 2 && (
+                      <Typography sx={{ px: 0.5, color: 'text.secondary', fontWeight: 800 }}>...</Typography>
+                    )}
+                  </>
+                )}
+
+                {visiblePages.map((p) => (
+                  <Button
+                    key={p}
+                    size="small"
+                    variant={p === page ? 'contained' : 'text'}
+                    onClick={() => handlePageChange(p)}
+                    disabled={isLoadingMore}
+                    sx={{
+                      borderRadius: 999,
+                      minWidth: 36,
+                      height: 36,
+                      fontWeight: 800,
+                      backgroundColor: p === page ? 'primary.main' : 'transparent',
+                      color: p === page ? '#fff' : 'text.secondary',
+                      '&:hover': {
+                        backgroundColor: p === page ? 'primary.dark' : 'rgba(255,255,255,0.08)',
+                      },
+                    }}
+                  >
+                    {p}
+                  </Button>
+                ))}
+
+                {visiblePages[visiblePages.length - 1] < totalPages && (
+                  <>
+                    {visiblePages[visiblePages.length - 1] < totalPages - 1 && (
+                      <Typography sx={{ px: 0.5, color: 'text.secondary', fontWeight: 800 }}>...</Typography>
+                    )}
+                    <Button
+                      size="small"
+                      variant="text"
+                      onClick={() => handlePageChange(totalPages)}
+                      sx={{ borderRadius: 999, minWidth: 36, height: 36, fontWeight: 800, color: 'text.secondary' }}
+                    >
+                      {totalPages}
+                    </Button>
+                  </>
+                )}
+
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => handlePageChange(page + 1)}
+                  disabled={!canPageNext || isLoadingMore}
+                  sx={{ borderRadius: 999, px: 2, py: 0.8, fontWeight: 800, minWidth: 90 }}
+                >
+                  {isLoadingMore ? 'Loading...' : 'Next'}
+                </Button>
+              </Box>
+            </Box>
           )}
 
           {status === 'empty' && jobs.length === 0 && !showTrending && (
@@ -397,9 +579,57 @@ export default function App() {
           )}
         </Box>
       </Container>
+
+      <Dialog
+        open={Boolean(selectedJob)}
+        onClose={() => setSelectedJob(null)}
+        fullWidth
+        maxWidth="md"
+        PaperProps={{
+          sx: {
+            bgcolor: '#111827',
+            color: 'text.primary',
+            border: '1px solid rgba(255,255,255,0.12)',
+          },
+        }}
+      >
+        <DialogTitle sx={{ fontWeight: 900 }}>{selectedJob?.title || 'Job details'}</DialogTitle>
+        <DialogContent dividers sx={{ borderColor: 'rgba(255,255,255,0.10)' }}>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
+            {[selectedJob?.company, selectedJob?.location, selectedJob?.employment_type, selectedJob?.experience]
+              .filter(Boolean)
+              .map((label) => (
+                <Chip key={label} size="small" label={label} sx={{ color: 'text.primary' }} />
+              ))}
+          </Box>
+          {selectedJob?.skills?.length > 0 && (
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
+              {selectedJob.skills.slice(0, 12).map((skill) => (
+                <Chip key={skill} size="small" label={skill} variant="outlined" />
+              ))}
+            </Box>
+          )}
+          <Typography sx={{ color: 'text.secondary', whiteSpace: 'pre-line', lineHeight: 1.7 }}>
+            {selectedJob?.description || 'No description was available from the source.'}
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setSelectedJob(null)} sx={{ fontWeight: 800 }}>
+            Close
+          </Button>
+          <Button
+            component="a"
+            href={selectedJob?.apply_url || selectedJob?.url || '#'}
+            target="_blank"
+            rel="noreferrer"
+            variant="contained"
+            disableElevation
+            sx={{ borderRadius: 999, fontWeight: 800 }}
+          >
+            Apply
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
-
-
-

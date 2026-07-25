@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from app.crawler.base import (
+from scripts.scraping.crawlers.base import (
     collect_job_candidates,
     detect_ats,
     extract_jobs_from_html,
@@ -603,6 +603,174 @@ async def _extract_jobs_from_json_payload(payload: Any, company: str, source: st
     return jobs
 
 
+def _has_working_apply(job: dict[str, Any]) -> bool:
+    return bool((job.get("apply_url") or job.get("url") or "").strip() or (job.get("job_id") or "").strip())
+
+
+def _job_missing_fields(job: dict[str, Any]) -> set[str]:
+    missing: set[str] = set()
+    if not (job.get("description") or "").strip():
+        missing.add("description")
+    if not (job.get("job_id") or "").strip():
+        missing.add("job_id")
+    if not (job.get("location") or "").strip():
+        missing.add("location")
+    if not _has_working_apply(job):
+        missing.add("apply")
+    return missing
+
+
+def _merge_job_enrichment(base: dict[str, Any], enriched: dict[str, Any]) -> dict[str, Any]:
+    """Merge enriched fields without overwriting valid existing values."""
+    merged = dict(base)
+    for field in ("description", "job_id", "location", "apply_url", "url"):
+        cur = (merged.get(field) or "").strip()
+        nxt = (enriched.get(field) or "").strip()
+        if nxt and not cur:
+            merged[field] = enriched[field]
+
+    # If apply_url/url got filled, keep url consistent with apply_url.
+    if merged.get("apply_url") and not merged.get("url"):
+        merged["url"] = merged.get("apply_url")
+    if merged.get("url") and not merged.get("apply_url"):
+        merged["apply_url"] = merged.get("url")
+
+    return merged
+
+
+async def _chain_enrich_jobs_from_possible_details(
+    *,
+    jobs: list[dict[str, Any]],
+    company: str,
+    careers_url: str,
+    company_base_url: str,
+    html: str,
+    keyword: str | None,
+    location: str | None,
+    max_secondary_per_page: int = 5,
+) -> list[dict[str, Any]]:
+    """Attempt secondary fetch for jobs missing key fields.
+
+    This is intentionally conservative and bounded. It tries to find a job detail
+    endpoint pattern from the HTML and then fetches up to a small budget.
+    """
+    # Candidate detail URLs embedded in HTML.
+    detail_urls: list[str] = []
+    for match in re.finditer(r'["\']([^"\']*(?:job|posting|requisition|requisitions|positions)[^"\']*)["\']', html, re.IGNORECASE):
+        value = match.group(1)
+        if not value:
+            continue
+        if value.startswith(("http://", "https://")):
+            full = value
+        else:
+            full = urljoin(careers_url, value)
+        if _is_allowed_source_url(full, company_base_url) and _looks_like_json_api_url(full):
+            detail_urls.append(full)
+
+    # Also try common ".../jobs/{id}" patterns from careers_url.
+    # We’ll use these as templates by appending an identifier.
+    templates: list[str] = []
+    for du in detail_urls[:10]:
+        if du.endswith(("/jobs", "/job", "/postings", "/posting", "/requisitions", "/positions", "/requisition")):
+            templates.append(du.rstrip("/"))
+        else:
+            templates.append(du)
+
+    budget = max_secondary_per_page
+    enriched_jobs: list[dict[str, Any]] = []
+
+    # Tokenized headers for JSON endpoints (best-effort).
+    tokens = _extract_dynamic_tokens(html)
+    headers = {
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": careers_url,
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+    }
+    if "x-csrf-token" in tokens:
+        headers["x-csrf-token"] = tokens["x-csrf-token"]
+
+    for job in jobs:
+        if budget <= 0:
+            enriched_jobs.append(job)
+            continue
+
+        missing = _job_missing_fields(job)
+        if not missing.intersection({"description", "job_id", "location"}):
+            enriched_jobs.append(job)
+            continue
+
+        identifier = (job.get("job_id") or "").strip()
+        apply_url = (job.get("apply_url") or job.get("url") or "").strip()
+
+        # Build possible detail URLs.
+        candidates: list[str] = []
+        for tpl in templates[:5]:
+            if identifier:
+                # Try direct suffix
+                candidates.append(tpl.rstrip("/") + "/" + identifier)
+                # Try query id form
+                sep = "&" if "?" in tpl else "?"
+                candidates.append(f"{tpl}{sep}id={identifier}")
+            if not candidates and apply_url:
+                # Try using numeric-looking id from apply url path.
+                id_match = re.search(r"(?:jobs?|job|requisitions?|posting|position)[/-](\d{4,}|\w+-\w+)", apply_url, re.IGNORECASE)
+                if id_match:
+                    candidates.append(tpl.rstrip("/") + "/" + id_match.group(1))
+
+        # De-dup candidates and keep allowed.
+        uniq: list[str] = []
+        seen: set[str] = set()
+        for c in candidates:
+            if c in seen:
+                continue
+            seen.add(c)
+            if _is_allowed_source_url(c, company_base_url):
+                uniq.append(c)
+        uniq = uniq[:3]
+
+        if not uniq:
+            enriched_jobs.append(job)
+            continue
+
+        # Try up to 1 detail fetch per job to stay bounded.
+        fetched: dict[str, Any] | None = None
+        for detail_url in uniq[:1]:
+            try:
+                payload = await request_json_with_retries(detail_url, headers=headers, timeout=12.0)
+            except Exception as exc:
+                logger.debug("Secondary enrich failed for %s (%s): %s", company, detail_url, exc)
+                continue
+
+            # If response is non-json, request_json_with_retries would have raised; still be defensive.
+            try:
+                extracted = await _extract_jobs_from_json_payload(payload, company, "secondary")
+            except Exception:
+                extracted = []
+
+            if extracted:
+                # Prefer the one with matching id if possible.
+                if identifier:
+                    for ej in extracted:
+                        if (ej.get("job_id") or "").strip() == identifier:
+                            fetched = ej
+                            break
+                if not fetched:
+                    fetched = extracted[0]
+
+        if fetched:
+            merged = _merge_job_enrichment(job, fetched)
+            enriched_jobs.append(merged)
+            budget -= 1
+        else:
+            enriched_jobs.append(job)
+
+    return enriched_jobs
+
+
+
 async def _fetch_jobs_from_candidate_apis(
     *,
     company: str,
@@ -625,28 +793,51 @@ async def _fetch_jobs_from_candidate_apis(
         headers["x-csrf-token"] = tokens["x-csrf-token"]
 
     jobs: list[dict[str, Any]] = []
-    for api_url in _extract_candidate_api_urls(html, careers_url, company_base_url):
+
+    candidate_apis = _extract_candidate_api_urls(html, careers_url, company_base_url)
+    # Hard cap: max 5 extra API calls per source.
+    candidate_apis = candidate_apis[:5]
+
+    for api_url in candidate_apis:
         await asyncio.sleep(0.1 + random.random() * 0.15)
+
+        if any(term in api_url.lower() for term in ("captcha", "cloudflare", "turnstile")):
+            logger.info("Restricted due to likely block for %s: %s", company, api_url)
+            break
+
         try:
             payload = await request_json_with_retries(api_url, headers=headers, timeout=15.0)
         except Exception:
             continue
-        extracted = await _extract_jobs_from_json_payload(payload, company, "json-api")
+
+        extracted = await _extract_jobs_from_json_payload(payload, company, "json-api") if payload is not None else []
+
         for job in extracted:
+            # Smart filtering: require a valid title and some apply mechanism.
+            if not (job.get("title") or "").strip():
+                continue
+            if not ((job.get("apply_url") or job.get("url") or "").strip() or (job.get("job_id") or "").strip()):
+                continue
+
             if keyword:
                 blob = f"{job.get('title', '')} {job.get('description', '')}".lower()
                 if keyword.lower() not in blob:
                     continue
+
             if location and job.get("location") and location.lower() not in job["location"].lower():
                 continue
+
             apply_url = job.get("apply_url") or ""
             if apply_url and not apply_url.startswith("http"):
                 job["apply_url"] = urljoin(careers_url, apply_url)
                 apply_url = job["apply_url"]
             if apply_url and not _is_allowed_source_url(apply_url, company_base_url):
                 continue
+
             jobs.append(job)
+
     return jobs
+
 
 
 async def _extract_jobs_by_fallback(company: str, careers_url: str, company_base_url: str, html: str) -> list[dict[str, Any]]:
@@ -851,7 +1042,26 @@ async def universal_crawl_jobs(
         location=location,
     )
     if not jobs:
-        jobs = await _extract_jobs_by_fallback(company=company_name, careers_url=careers_url, company_base_url=company_base_url, html=html)
+        jobs = await _extract_jobs_by_fallback(
+            company=company_name,
+            careers_url=careers_url,
+            company_base_url=company_base_url,
+            html=html,
+        )
+
+    # Chained fetching (secondary enrichment) for partial job entries.
+    if jobs:
+        jobs = await _chain_enrich_jobs_from_possible_details(
+            jobs=jobs,
+            company=company_name,
+            careers_url=careers_url,
+            company_base_url=company_base_url,
+            html=html,
+            keyword=keyword,
+            location=location,
+            max_secondary_per_page=5,
+        )
+
 
     # Pagination heuristic: try ?page= or offset=/start=
     if page > 1:

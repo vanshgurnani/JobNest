@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Button, Card, CardContent, CardActions, Chip, Typography } from '@mui/material';
 
-export default function JobCard({ job }) {
+export default function JobCard({ job, onView }) {
   const applyHref = job?.apply_url || job?.url || '';
 
   return (
@@ -68,6 +68,18 @@ export default function JobCard({ job }) {
 
       <CardActions sx={{ p: 2.1, pt: 0 }}>
         <Button
+          onClick={onView}
+          variant="outlined"
+          sx={{
+            borderRadius: 999,
+            py: 1,
+            px: 2.1,
+            fontWeight: 700,
+          }}
+        >
+          Details
+        </Button>
+        <Button
           component="a"
           href={applyHref}
           target="_blank"
@@ -92,5 +104,4 @@ export default function JobCard({ job }) {
     </Card>
   );
 }
-
 

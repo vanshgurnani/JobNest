@@ -1,22 +1,24 @@
 from __future__ import annotations
 import asyncio
+import importlib
 import logging
 from typing import Any, Callable, Coroutine, Optional
 from urllib.parse import urlparse
 
-from app.crawler.amazon import fetch_amazon_jobs
-from app.crawler.meta import fetch_meta_jobs
-from app.crawler.microsoft import fetch_microsoft_jobs
 from app.services.ai_parser import parse_job_details
 
 logger = logging.getLogger(__name__)
 
 
-# Registry maps company slug → (fetch_fn, default_keyword, default_location)
-_REGISTRY: dict[str, tuple[Callable[..., Coroutine[Any, Any, list[dict[str, Any]]]], str, str]] = {
-    "amazon": (fetch_amazon_jobs, "Software", ""),
-    "microsoft": (fetch_microsoft_jobs, "software", ""),
-    "meta": (fetch_meta_jobs, "Software", ""),
+_CrawlerSpec = tuple[str, str, str]
+
+# Registry maps company slug -> (module.function, default_keyword, default_location).
+# Crawler modules are imported lazily so production API boot does not require
+# optional scraper-only dependencies such as Playwright.
+_REGISTRY: dict[str, _CrawlerSpec] = {
+    "amazon": ("scripts.scraping.crawlers.amazon.fetch_amazon_jobs", "Software", ""),
+    "microsoft": ("scripts.scraping.crawlers.microsoft.fetch_microsoft_jobs", "software", ""),
+    "meta": ("scripts.scraping.crawlers.meta.fetch_meta_jobs", "Software", ""),
 }
 
 
@@ -29,6 +31,16 @@ def _company_name_from_url(company_url: str) -> str:
     return labels[0].replace("-", " ")
 
 
+def supported_companies() -> list[str]:
+    return sorted(_REGISTRY.keys())
+
+
+def _load_fetch_fn(path: str) -> Callable[..., Coroutine[Any, Any, list[dict[str, Any]]]]:
+    module_name, function_name = path.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, function_name)
+
+
 async def _crawl_universal(
     *,
     company_name: str,
@@ -38,7 +50,7 @@ async def _crawl_universal(
     page: int,
     limit: int,
 ) -> dict[str, Any]:
-    from app.crawler.universal import universal_crawl_jobs
+    from scripts.scraping.crawlers.universal import universal_crawl_jobs
 
     try:
         jobs = await universal_crawl_jobs(
@@ -143,7 +155,8 @@ async def crawl_jobs(
                 )
             ]
 
-        fetch_fn, default_kw, default_loc = _REGISTRY[company_key]
+        fetch_path, default_kw, default_loc = _REGISTRY[company_key]
+        fetch_fn = _load_fetch_fn(fetch_path)
         result = await _safe_crawl(
             company_key,
             fetch_fn,
@@ -160,13 +173,13 @@ async def crawl_jobs(
     tasks = [
         _safe_crawl(
             name,
-            fetch_fn,
+            _load_fetch_fn(fetch_path),
             keyword or default_kw,
             location or default_loc,
             page,
             limit,
         )
-        for name, (fetch_fn, default_kw, default_loc) in _REGISTRY.items()
+        for name, (fetch_path, default_kw, default_loc) in _REGISTRY.items()
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
