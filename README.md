@@ -1,107 +1,100 @@
-# AI Job Intelligence Job Portal
+# JobCafe - AI Job Intelligence Portal
 
-A lightweight **FastAPI** backend, React frontend, and dedicated Playwright-free scraping engine for serving normalized job data from MongoDB.
-
-Scraping runs outside the request path via dedicated CLI scripts (`scrapers/scrape_jobs.py`), keeping production deployments small, fast, and optimized for low-CPU free tiers (0.1 CPU limit).
-
-- **MongoDB-backed jobs** with in-memory response cache
-- **No Playwright dependency** in production or scraping
-- **Frontend pagination** with interactive page controls
-- **Sequential scraper scripts** with `local` preview and `db` modes
-- **Docker & Docker Compose** setup for containerized MongoDB + FastAPI backend
-
----
+A modern job aggregation platform with a FastAPI backend, React frontend, and Playwright-free scraping engine. Scrapes job listings from top companies and serves them through a responsive, dark-themed UI.
 
 ## Features
 
-- **Frontend Pagination**: Intuitive numbered pagination, previous/next page navigation, and job item counts (`job-cafe`).
-- `GET /jobs`: Returns paginated stored job results.
-- `GET /jobs/{company}`: Returns paginated stored results for a single company.
-- `GET /job/{job_id}`: Returns a stored job detail.
-- **Scraper Engine**:
-  - `local` mode: Tests data retrieval, outputs structured logs, previews the **first 4 data points**, and logs total scraped job count without requiring MongoDB.
-  - `db` mode: Connects to MongoDB and sequentially upserts scraped job records.
+- **Job Aggregation** - Scrapes jobs from Amazon, Microsoft, Meta, and any company via universal ATS-aware crawler
+- **FastAPI Backend** - Async MongoDB (Motor), in-memory TTL cache, paginated REST API
+- **React Frontend** - Dark theme, glassmorphic UI, animated job cards, real-time search
+- **Playwright-Free Scraping** - 100% async HTTP + HTML parsing, 0.1 CPU friendly
+- **Dual Scraper Modes** - `local` (preview) and `db` (MongoDB persistence)
+- **Universal Crawler** - Detects Lever, Greenhouse, Workday, Ashby, SmartRecruiters ATS platforms
+- **Docker Support** - One-command deployment with MongoDB + Backend + Scraper
 
----
+## Quick Start
 
-## Project Structure
+### Backend
 
-```text
-app/
-  api/
-    jobs.py                 # API routes (/health, /jobs, /jobs/{company}, /job/{job_id})
-  db/
-    mongo.py                # Mongo connection + indexes
-  services/
-    cache.py                # In-memory TTL cache
-    job_store.py            # Mongo job read/upsert helpers
-    ai_parser.py           # Parsing skills/experience from title
-  schemas/
-    job.py                 # Pydantic Job model
-scrapers/                   # DEDICATED SCRAPING DIRECTORY
-  scrape_jobs.py            # CLI entry point (local / db modes)
-  crawlers/
-    orchestrator.py         # Crawler orchestrator
-    base.py                 # Async HTTP retries, normalization, ATS utils
-    universal.py            # Universal fallback scraper
-    amazon.py               # Amazon API crawler
-    microsoft.py            # Microsoft PCSX API crawler
-    meta.py                 # Meta HTTP crawler (Playwright-free)
-job-cafe/                   # React Vite Frontend
-  src/
-    App.jsx                 # Main application UI with Pagination
-docker-compose.yml          # Container orchestration (MongoDB + FastAPI + Scraper)
-Dockerfile                  # Backend container build
-tests/
-  test_crawlers.py          # Unit tests
-```
-
----
-
-## Running Scrapers
-
-Execute the scraper from the project root:
-
-### Local Preview Mode (No DB required)
-Scrapes data sequentially, logs progress, previews the **first 4 data points**, and logs total job count:
 ```bash
-python scrapers/scrape_jobs.py --mode local --companies amazon,microsoft,meta --pages 1
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python run.py
 ```
 
-### Production Database Mode (Populates MongoDB)
-Connects to MongoDB and upserts scraped job records:
+### Scrape Jobs (Preview Mode)
+
+```bash
+python scrapers/scrape_jobs.py --mode local --companies amazon,microsoft --pages 1
+```
+
+### Scrape Jobs (Store to MongoDB)
+
 ```bash
 python scrapers/scrape_jobs.py --mode db --companies all --pages 2
 ```
 
----
+### Frontend
 
-## Running with Docker & MongoDB
+```bash
+cd job-cafe && npm install && npm run dev
+```
 
-To run MongoDB alongside the FastAPI backend using Docker Compose:
+### Docker
 
-1. **Start MongoDB and FastAPI Backend**:
-   ```bash
-   docker compose up -d
-   ```
-   - MongoDB will run on port `27017` with volume persistence.
-   - FastAPI Backend will run on port `10000`.
+```bash
+docker compose up -d
+docker compose --profile tools run scraper
+```
 
-2. **Populate MongoDB via Containerized Scraper**:
-   ```bash
-   docker compose --profile tools run scraper
-   ```
+## Documentation
 
-3. **Stop Docker Services**:
-   ```bash
-   docker compose down
-   ```
+| Document | Description |
+|---|---|
+| [Setup Guide](docs/SETUP.md) | Full local development setup |
+| [Architecture](docs/ARCHITECTURE.md) | System design and codebase overview |
+| [Scraper Guide](docs/SCRAPER_GUIDE.md) | Scraper CLI usage and crawler strategies |
+| [API Reference](docs/API.md) | REST API endpoints and schemas |
+| [Docker Deployment](docs/DOCKER_DEPLOYMENT.md) | Containerized deployment guide |
 
----
+## Stack
+
+### Backend
+- **Python 3.11** / **FastAPI 0.115** - Async web framework
+- **MongoDB 7.0** / **Motor 3.6** - Async database
+- **HTTPX 0.28** - Async HTTP client
+- **BeautifulSoup4 + lxml** - HTML parsing
+
+### Frontend
+- **React 18** - UI framework
+- **Material UI 9** - Component library
+- **Vite 5** - Build tool
+- **Framer Motion 12** - Animations
+
+### Infrastructure
+- **Docker** / **Docker Compose** - Containerization
 
 ## API Endpoints
 
-- `GET /health` – Health check endpoint
-- `GET /jobs?page=1&limit=20` – Returns paginated stored job listings
-- `GET /jobs/{company}?page=1&limit=20` – Returns paginated jobs for a specific company
-- `GET /job/{job_id}` – Returns specific job details
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Health check |
+| `GET /jobs` | Paginated job listings (filters: company, keyword, location) |
+| `GET /jobs/{company}` | Jobs by company |
+| `GET /job/{job_id}` | Single job detail |
+
+## Project Structure
+
+```
+app/                          # FastAPI backend
+scrapers/                     # Scraper engine
+  scrape_jobs.py              # CLI entry point
+  crawlers/                   # Company-specific + universal crawlers
+job-cafe/                     # React frontend
+docs/                         # Documentation
+tests/                        # Unit tests
+```
+
+## License
+
+MIT

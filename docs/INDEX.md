@@ -1,44 +1,49 @@
-# Job Intelligence Portal Documentation Index
+# Job Intelligence Portal Documentation
 
-Welcome to the documentation for **Job Intelligence Portal & Scraper Platform**.
-
-This documentation outlines the codebase architecture, Playwright-free scraping engine, database models, frontend UI, and Docker MongoDB deployment setup.
-
----
+Welcome to the documentation for **JobCafe** - an AI-powered job intelligence portal and scraping platform.
 
 ## Documentation Sections
 
-1. 📄 **[System Architecture & Overview](ARCHITECTURE.md)**
-   - Complete codebase structure and component flow.
-   - FastAPI backend routes, MongoDB database layer, and in-memory TTL cache.
-   - Low-CPU optimization principles (0.1 CPU limit friendly).
+| Document | Description |
+|---|---|
+| [Setup Guide](SETUP.md) | Local development setup instructions |
+| [System Architecture](ARCHITECTURE.md) | Codebase structure and component flow |
+| [Scraper Engine Guide](SCRAPER_GUIDE.md) | Scraper CLI usage, crawlers, and strategies |
+| [API Reference](API.md) | REST API endpoints, parameters, and schemas |
+| [Docker Deployment](DOCKER_DEPLOYMENT.md) | Containerized deployment with Docker Compose |
 
-2. 🕷️ **[Scraper Engine & CLI Guide](SCRAPER_GUIDE.md)**
-   - Overview of `scrapers/scrape_jobs.py` and `scrapers/crawlers/`.
-   - Detailed usage of `--mode local` (preview mode with logs and 4-point data preview).
-   - Detailed usage of `--mode db` (sequential MongoDB upserts).
-   - Supported company scrapers and ATS detection ladder.
+## Quick Reference
 
-3. 🐳 **[Docker & MongoDB Deployment](DOCKER_DEPLOYMENT.md)**
-   - Complete guide to deploying MongoDB and FastAPI backend using Docker Compose.
-   - Running containerized scrapers (`docker compose --profile tools run scraper`).
-   - Environment variables and data volume persistence.
-
----
-
-## Quick Reference Commands
-
-### Local Scraper Run (Dry Run Preview)
+### Start Backend
 ```bash
-python scrapers/scrape_jobs.py --mode local --companies amazon,microsoft,meta --pages 1
+python run.py
 ```
 
-### Production Database Populate
+### Start Frontend
+```bash
+cd job-cafe && npm run dev
+```
+
+### Run Scraper (Preview)
+```bash
+python scrapers/scrape_jobs.py --mode local --companies amazon --pages 1
+```
+
+### Run Scraper (Store to DB)
 ```bash
 python scrapers/scrape_jobs.py --mode db --companies all --pages 2
 ```
 
-### Docker Compose Start
+### Docker Compose
 ```bash
 docker compose up -d
+docker compose --profile tools run scraper
 ```
+
+## Tech Stack
+
+- **Backend**: Python 3.11, FastAPI 0.115, Uvicorn
+- **Database**: MongoDB 7.0 (Motor 3.6 async driver)
+- **Scraping**: HTTPX 0.28, BeautifulSoup4, lxml
+- **Frontend**: React 18, Material UI 9, Framer Motion, Vite 5
+- **Infrastructure**: Docker, Docker Compose
