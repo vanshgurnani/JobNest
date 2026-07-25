@@ -2,6 +2,20 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { fetchJobById } from '../services/api';
 
+function cleanDescription(text) {
+  if (!text) return '';
+  return text
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function timeAgo(dateStr) {
   if (!dateStr) return null;
   const date = new Date(dateStr);
@@ -192,16 +206,10 @@ export default function JobDetailPage() {
         <div>
           <h2 className="mb-3 text-base font-semibold text-ink">About this job</h2>
           <div className="prose prose-sm max-w-none text-ink-secondary leading-relaxed whitespace-pre-line">
-            {job.description || 'No description was available from the source.'}
+            {cleanDescription(job.description) || 'No description was available from the source.'}
           </div>
         </div>
 
-        {job.source && (
-          <p className="mt-6 text-xs text-ink-muted">
-            Source: {job.source}
-            {job.crawled_at && ` · Crawled: ${new Date(job.crawled_at).toLocaleDateString()}`}
-          </p>
-        )}
       </div>
     </div>
   );

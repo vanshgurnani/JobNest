@@ -84,11 +84,12 @@ class GenericScraper:
         page: int = 1,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
+        fetch_url = _build_page_url(url, page) if page > 1 else url
         html: str | None = None
         try:
-            html = await request_with_retries(url)
+            html = await request_with_retries(fetch_url)
         except Exception as exc:
-            self.logger.warning("GenericScraper failed to fetch %s: %s", url, exc)
+            self.logger.warning("GenericScraper failed to fetch %s: %s", fetch_url, exc)
             return []
 
         # Lazy imports to avoid circular deps and keep universal.py untouched
@@ -153,6 +154,8 @@ class GenericScraper:
 
         # 3 — Anchor links (catches <a> tags with job-like hrefs/text)
         html_jobs = extract_jobs_from_html(html, company=company_name, base_url=url)
+        # 3a — Extract location & description from search page HTML layout (Apple etc.)
+        sp_map = _extract_search_page_metadata(html)
         for j in html_jobs:
             title = (j.get("title") or "").strip()
             if not title or not _looks_like_job_title(title):
@@ -160,13 +163,22 @@ class GenericScraper:
             if title.lower() in seen_titles:
                 continue
             seen_titles.add(title.lower())
+            loc = j.get("location", "")
+            if not loc:
+                title_norm = title.lower().replace("&amp;", "&")
+                for sp_title, sp_loc in sp_map:
+                    st_lower = sp_title.lower().replace("&amp;", "&")
+                    if st_lower and (title_norm in st_lower or st_lower in title_norm):
+                        loc = sp_loc
+                        break
+            job_url = j.get("url", "") or ""
             all_jobs.append({
                 "title": title,
                 "company": company_name.title(),
-                "location": j.get("location", ""),
+                "location": loc,
                 "description": j.get("description", ""),
-                "apply_url": j.get("url", url),
-                "url": j.get("url", url),
+                "apply_url": job_url,
+                "url": job_url,
                 "job_id": j.get("job_id", ""),
                 "skills": j.get("skills", []),
                 "employment_type": "",
@@ -226,6 +238,21 @@ class GenericScraper:
                     if re.search(r"[A-Z][a-z]+(?:[\s,]+[A-Z][a-z]+)*(?:,\s*[A-Z]{2,})?", sibling_text) or "remote" in sibling_text.lower():
                         location_text = sibling_text[:100]
                         break
+                if not location_text:
+                    el = tag
+                    for _ in range(10):
+                        el = el.parent
+                        if not el:
+                            break
+                        ptext = el.get_text(strip=True)
+                        loc_match = re.search(
+                            r"(?:Bengaluru|Hyderabad|Mumbai|Pune|Gurgaon|Gurugram|Delhi|Chennai|Kolkata|New Delhi)"
+                            r"(?:,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)?(?:\s*,\s*India)?",
+                            ptext,
+                        )
+                        if loc_match:
+                            location_text = loc_match.group(0)
+                            break
 
                 all_jobs.append({
                     "title": text[:200],
@@ -241,7 +268,143 @@ class GenericScraper:
                     "source": "generic-heuristic",
                 })
 
+            all_jobs = [j for j in all_jobs if _looks_like_job_title(j.get("title", ""))]
+
+        # 5 — Fix apply_url from embedded detail-page URLs (e.g. Google)
+        _patch_detail_urls(all_jobs, html, url)
+
+        if all_jobs:
+            all_jobs = await _enrich_jobs(all_jobs, page, limit)
+
         return _slice_and_filter(all_jobs, keyword, location, page, limit)
+
+
+def _build_page_url(url: str, page: int) -> str:
+    if page <= 1:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}page={page}"
+
+
+_DETAIL_URL_RE = re.compile(
+    r'(?:href|data-url|data-href)=["\']([^"\']*(?:job|career|careers|position|requisition|opening)s?/'
+    r'(?:\d+[-\w]*|results/\d+[-\w]*)[^"\']*)["\']'
+)
+
+
+def _patch_detail_urls(
+    jobs: list[dict[str, Any]],
+    html: str,
+    search_url: str,
+) -> None:
+    base = "https://www.google.com/about/careers/applications"
+    detail_urls: list[tuple[str, str]] = []
+    seen_slugs: set[str] = set()
+    for m in _DETAIL_URL_RE.finditer(html):
+        raw = m.group(1).replace("&amp;", "&")
+        slug_match = re.search(r'results/(\d+)-([^&?\s]+)', raw)
+        if slug_match:
+            slug = slug_match.group(2)
+            if slug not in seen_slugs:
+                seen_slugs.add(slug)
+                furl = f"{base}/jobs/results/{slug_match.group(1)}-{slug}?location=India"
+                detail_urls.append((slug, furl))
+
+    for job in jobs:
+        title = (job.get("title") or "").lower()
+        title_slug = re.sub(r"[^a-z0-9]+", "-", title).strip("-")
+        for slug, furl in detail_urls:
+            if title_slug in slug or slug in title_slug:
+                job["apply_url"] = furl
+                job["url"] = furl
+                break
+
+
+def _extract_search_page_metadata(html: str) -> list[tuple[str, str]]:
+    results: list[tuple[str, str]] = []
+    soup = BeautifulSoup(html, "lxml")
+    for title_div in soup.find_all("div", class_=lambda c: c and "job-title-location" in c):
+        text = title_div.get_text(strip=True)
+        loc = text.removeprefix("Location").strip() if text.startswith("Location") else text
+        sibling = title_div.find_previous_sibling("div")
+        if not sibling:
+            sibling = title_div.parent.find_previous_sibling("div") if title_div.parent else None
+        parent_row = title_div.find_parent(class_=lambda c: c and "job-list-item" in c)
+        if parent_row:
+            title_el = parent_row.find(class_=lambda c: c and "job-title" in c)
+            if title_el:
+                title_text = title_el.get_text(strip=True)
+                title_clean = title_text.split("Apple Retail")[0].split("Software and Services")[0].split("Operations")[0].split("Corporate")[0].strip()
+                results.append((title_clean, loc))
+    if not results:
+        for item in soup.find_all("div", class_=lambda c: c and "job-title" in c):
+            parent = item.find_parent(class_=lambda c: c and "job-list-item" in c)
+            if not parent:
+                continue
+            title_text = item.get_text(strip=True)
+            title_clean = re.sub(r"\s+(Software and Services|Operations|Corporate|Apple Retail).*", "", title_text).strip()
+            loc_div = parent.find(class_=lambda c: c and "job-title-location" in c)
+            if loc_div:
+                loc_text = loc_div.get_text(strip=True).removeprefix("Location").strip()
+                dist = abs(title_clean.count(" ") - loc_text.count(" ")) if title_clean and loc_text else 999
+                if dist < 8 and not any(title_clean == t for t, _ in results):
+                    results.append((title_clean, loc_text))
+    return results
+
+
+async def _enrich_jobs(
+    jobs: list[dict[str, Any]],
+    page: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    _DEFAULT_DESC = "Job listing scraped from"
+
+    async def _enrich_one(job: dict[str, Any]) -> dict[str, Any]:
+        detail_url = job.get("apply_url") or job.get("url", "")
+        if not detail_url:
+            return job
+        try:
+            detail_html = await request_with_retries(detail_url, timeout=10.0)
+            from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
+
+            soup = BeautifulSoup(detail_html, "lxml")
+            jsonld_items = _extract_jsonld_jobpostings(detail_html)
+            for item in jsonld_items:
+                parsed = _parse_jsonld_jobposting(item)
+                if parsed.get("description"):
+                    job["description"] = parsed["description"]
+                if parsed.get("location"):
+                    job["location"] = parsed["location"]
+                if parsed.get("apply_url") and "?" not in parsed["apply_url"].split("/")[-1]:
+                    job["apply_url"] = parsed["apply_url"]
+                    job["url"] = parsed["apply_url"]
+
+            cur_desc = job.get("description") or ""
+            if _DEFAULT_DESC in cur_desc or not cur_desc:
+                meta = soup.find("meta", attrs={"name": "description"})
+                if meta and meta.get("content"):
+                    job["description"] = meta["content"]
+                og = soup.find("meta", property="og:description")
+                if og and og.get("content") and (not job.get("description") or _DEFAULT_DESC in str(job.get("description",""))):
+                    job["description"] = og["content"]
+
+            if not job.get("location"):
+                loc_meta = soup.find("meta", attrs={"name": "joblocation"})
+                if loc_meta and loc_meta.get("content"):
+                    job["location"] = loc_meta["content"]
+        except Exception:
+            pass
+        return job
+
+    max_enrich = min(len(jobs), 15)
+    BATCH = 5
+    enriched = []
+    for i in range(0, max_enrich, BATCH):
+        batch = jobs[i : i + BATCH]
+        results = await asyncio.gather(*[_enrich_one(j) for j in batch])
+        enriched.extend(results)
+    enriched.extend(jobs[max_enrich:])
+    return enriched
 
 
 def _looks_like_job_title(text: str) -> bool:
@@ -262,11 +425,22 @@ def _looks_like_job_title(text: str) -> bool:
         r"apple\s+retail$",
         r"see\s+full\s+role\s+description",
         r"^shared\s+values$",
+        r"^sign\s+in$",
+        r"(policy|rights|discrimination|illegal)",
+        r"^how\s+we\s+(hire|work|build)",
     ]
     lower = text.lower().strip()
     for pat in _NAV_PATTERNS:
-        if re.match(pat, lower):
+        if re.search(pat, lower):
             return False
+    _JOB_KEYWORDS_IN_TITLE = {
+        "engineer", "developer", "manager", "designer", "analyst",
+        "scientist", "intern", "architect", "consultant", "specialist",
+        "coordinator", "director", "lead", "head", "vp", "chief",
+        "officer", "associate", "operations", "product", "software",
+    }
+    if not any(kw in lower for kw in _JOB_KEYWORDS_IN_TITLE):
+        return False
     return True
 
 
@@ -304,8 +478,7 @@ def _slice_and_filter(
     if location:
         loc = location.lower()
         jobs = [j for j in jobs if not j.get("location") or loc in j["location"].lower()]
-    start = max(page - 1, 0) * limit
-    return jobs[start : start + limit]
+    return jobs[:limit]
 
 
 def _company_name_from_url(url: str) -> str:

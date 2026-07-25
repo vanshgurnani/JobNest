@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -30,7 +31,7 @@ def _stable_job_id(job: dict[str, Any]) -> str:
     apply_url = str(job.get("apply_url") or job.get("url") or "").strip()
     company = str(job.get("company") or "").strip().lower()
     title = str(job.get("title") or "").strip().lower()
-    seed = apply_url or f"{company}:{title}"
+    seed = f"{apply_url}:::{company}:::{title}" if apply_url else f"{company}:{title}"
     if not seed:
         return ""
     return hashlib.sha256(seed.encode()).hexdigest()[:20]
@@ -42,13 +43,17 @@ def canonicalize_job(job: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job.get("job_id") or job.get("id") or "").strip()
     stable_id = _stable_job_id(job)
 
+    desc = str(job.get("description") or "").strip()
+    desc = re.sub(r"<[^>]+>", " ", desc)
+    desc = re.sub(r"\s+", " ", desc).strip()
+
     return {
         "id": stable_id,
         "job_id": job_id or stable_id,
         "company": str(job.get("company") or "").strip(),
         "title": str(job.get("title") or "Untitled").strip(),
         "location": str(job.get("location") or "").strip(),
-        "description": str(job.get("description") or "").strip(),
+        "description": desc,
         "employment_type": str(job.get("employment_type") or "").strip(),
         "experience": str(job.get("experience") or "").strip(),
         "skills": list(job.get("skills") or []),
