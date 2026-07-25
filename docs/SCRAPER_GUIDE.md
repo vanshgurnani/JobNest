@@ -106,7 +106,7 @@ Each job is normalized to this structure:
 
 ```json
 {
-  "id": "md5_hash_of_company_and_job_id",
+  "id": "sha256_hash_of_apply_url_or_company_title",
   "company": "Amazon",
   "title": "Software Development Engineer",
   "location": "Seattle, WA",

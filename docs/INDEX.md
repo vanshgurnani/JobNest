@@ -1,6 +1,6 @@
-# Job Intelligence Portal Documentation
+# Job Nest Documentation
 
-Welcome to the documentation for **JobCafe** - an AI-powered job intelligence portal and scraping platform.
+Welcome to the documentation for **Job Nest** — an AI-powered job aggregation platform.
 
 ## Documentation Sections
 
@@ -21,7 +21,7 @@ python run.py
 
 ### Start Frontend
 ```bash
-cd job-cafe && npm run dev
+cd job-portal && npm run dev
 ```
 
 ### Run Scraper (Preview)
@@ -45,5 +45,5 @@ docker compose --profile tools run scraper
 - **Backend**: Python 3.11, FastAPI 0.115, Uvicorn
 - **Database**: MongoDB 7.0 (Motor 3.6 async driver)
 - **Scraping**: HTTPX 0.28, BeautifulSoup4, lxml
-- **Frontend**: React 18, Material UI 9, Framer Motion, Vite 5
+- **Frontend**: React 18, Tailwind CSS 3.4, Vite 5
 - **Infrastructure**: Docker, Docker Compose

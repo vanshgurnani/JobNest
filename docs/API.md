@@ -107,7 +107,7 @@ Cache is automatically invalidated after 15 minutes and evicted under LRU pressu
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | string | Unique job identifier (MD5 hash) |
+| `id` | string | Unique job identifier (SHA-256 hash) |
 | `company` | string | Company name |
 | `title` | string | Job title |
 | `location` | string | Job location |

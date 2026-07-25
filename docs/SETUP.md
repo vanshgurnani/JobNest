@@ -35,7 +35,7 @@ Edit `.env`:
 
 ```env
 MONGO_URI=mongodb://localhost:27017
-MONGO_DB_NAME=job_db
+MONGO_DB_NAME=job_scraper
 MONGO_COLLECTION_NAME=jobs
 ```
 
@@ -74,13 +74,13 @@ python scrapers/scrape_jobs.py --mode db --companies amazon,microsoft --pages 1
 ### 1. Install Dependencies
 
 ```bash
-cd job-cafe
+cd job-portal
 npm install
 ```
 
 ### 2. Configure API URL
 
-Edit `job-cafe/.env`:
+Edit `job-portal/.env`:
 
 ```env
 VITE_API_BASE=http://localhost:8000
@@ -100,7 +100,7 @@ Frontend runs at `http://localhost:5173` with API requests proxied to `localhost
 npm run build
 ```
 
-Output is in `job-cafe/dist/`.
+Output is in `job-portal/dist/`.
 
 ## Docker Setup
 
