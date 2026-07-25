@@ -80,6 +80,12 @@ python run.py
 python scrapers/scrape_jobs.py --mode local --companies amazon,microsoft --pages 1
 ```
 
+### Scrape Jobs by URL (Bypass Company Name Lookup)
+
+```bash
+python scrapers/scrape_jobs.py --mode local --company-url "https://careers.google.com"
+```
+
 ### Scrape Jobs (Store to MongoDB)
 
 ```bash

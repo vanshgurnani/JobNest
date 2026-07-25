@@ -87,6 +87,7 @@
 
 - **Modes**: `local` (dry-run preview to stdout) and `db` (MongoDB upsert)
 - **Strategy**: Company-specific crawlers first (Amazon, Microsoft, Meta), universal fallback for unknown
+- **URL-based scraping**: Pass any career page URL via `--company-url` — bypasses company name lookup, infers company from domain, and uses the universal ATS-aware crawler
 - **Deduplication**: SHA-256 hash of (company + job_id/apply_url/title+location)
 - **ATS detection**: Lever, Greenhouse, Ashby, Workday, SmartRecruiters via URL + HTML patterns
 - **Retry**: Exponential backoff, 3 retries

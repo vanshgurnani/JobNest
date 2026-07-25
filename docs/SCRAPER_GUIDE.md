@@ -67,12 +67,28 @@ python scrapers/scrape_jobs.py --mode db --companies all --pages 3
 python scrapers/scrape_jobs.py --mode db --companies microsoft --keyword engineer --location "Redmond"
 ```
 
+### URL-Based Scraping (Bypass Company Name Lookup)
+
+Scrape any company by its career page URL. The universal ATS-aware crawler automatically detects Lever, Greenhouse, Workday, Ashby, SmartRecruiters, or falls back to HTML/JSON-LD extraction.
+
+```bash
+# Scrape a single career page URL
+python scrapers/scrape_jobs.py --mode local --company-url "https://careers.google.com"
+
+# Scrape multiple URLs
+python scrapers/scrape_jobs.py --mode db --company-url "https://careers.google.com,https://jobs.apple.com"
+
+# Combine named companies and URLs
+python scrapers/scrape_jobs.py --mode db --companies amazon --company-url "https://careers.google.com"
+```
+
 ### All CLI Options
 
 | Argument | Default | Description |
 |---|---|---|
 | `--mode` | `local` | `local` or `db` |
 | `--companies` | `all` | Comma-separated slugs (e.g. `amazon,microsoft`) or `all` |
+| `--company-url` | `None` | Comma-separated career page URLs to scrape (bypasses company name lookup, uses universal crawler) |
 | `--keyword` | `None` | Keyword filter passed to crawlers |
 | `--location` | `None` | Location filter passed to crawlers |
 | `--pages` | `2` | Pages per company |

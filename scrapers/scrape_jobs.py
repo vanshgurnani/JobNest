@@ -27,6 +27,12 @@ def _parse_company_list(value: str | None) -> list[str]:
     return [part.strip().lower() for part in value.split(",") if part.strip()]
 
 
+def _parse_url_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
 def _format_jobs_preview(jobs: list[dict[str, Any]]) -> str:
     preview = []
     for idx, job in enumerate(jobs[:4], start=1):
@@ -43,8 +49,9 @@ def _format_jobs_preview(jobs: list[dict[str, Any]]) -> str:
 
 
 async def _scrape_company(
-    company: str,
+    company: str | None,
     *,
+    company_url: str | None = None,
     keyword: str | None,
     location: str | None,
     pages: int,
@@ -53,11 +60,13 @@ async def _scrape_company(
 ) -> list[dict[str, Any]]:
     all_jobs: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    label = company_url or company or "unknown"
 
     for page in range(1, pages + 1):
-        LOGGER.info("[SCRAPE] Fetching company='%s' page=%d limit=%d", company, page, page_size)
+        LOGGER.info("[SCRAPE] Fetching target='%s' page=%d limit=%d", label, page, page_size)
         results = await crawl_jobs(
             company=company,
+            company_url=company_url,
             keyword=keyword,
             location=location,
             page=page,
@@ -76,29 +85,31 @@ async def _scrape_company(
                 )
             for raw_job in result.get("jobs", []):
                 job = canonicalize_job(raw_job)
-                job_id = job.get("id") or f"{company}-{len(seen_ids)+1}"
+                job_id = job.get("id") or f"{label}-{len(seen_ids)+1}"
                 if job_id in seen_ids:
                     continue
                 seen_ids.add(job_id)
                 page_jobs.append(job)
 
-        LOGGER.info("[SCRAPE] Page complete company='%s' page=%d jobs_found=%d", company, page, len(page_jobs))
+        LOGGER.info("[SCRAPE] Page complete target='%s' page=%d jobs_found=%d", label, page, len(page_jobs))
         if not page_jobs:
-            LOGGER.info("[SCRAPE] No further jobs found for company='%s' on page=%d. Ending company pagination.", company, page)
+            LOGGER.info("[SCRAPE] No further jobs found for target='%s' on page=%d. Ending pagination.", label, page)
             break
 
         all_jobs.extend(page_jobs)
         if page < pages and delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
 
-    LOGGER.info("[SCRAPE] Finished scraping company='%s'. Total jobs collected: %d", company, len(all_jobs))
+    LOGGER.info("[SCRAPE] Finished scraping target='%s'. Total jobs collected: %d", label, len(all_jobs))
     return all_jobs
 
 
 async def _run(args: argparse.Namespace) -> None:
     companies = _parse_company_list(args.companies)
-    if not companies:
-        raise SystemExit("No companies selected for scraping.")
+    urls = _parse_url_list(args.company_url)
+
+    if not companies and not urls:
+        raise SystemExit("No companies or company URLs selected for scraping.")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -107,8 +118,11 @@ async def _run(args: argparse.Namespace) -> None:
 
     LOGGER.info("=" * 60)
     LOGGER.info("STARTING JOB SCRAPER | Mode: %s", args.mode.upper())
-    LOGGER.info("Target Companies: %s", ", ".join(companies))
-    LOGGER.info("Pages per Company: %d | Limit per Page: %d", args.pages, args.page_size)
+    if companies:
+        LOGGER.info("Target Companies: %s", ", ".join(companies))
+    if urls:
+        LOGGER.info("Target URLs: %s", ", ".join(urls))
+    LOGGER.info("Pages per Target: %d | Limit per Page: %d", args.pages, args.page_size)
     LOGGER.info("=" * 60)
 
     if args.mode == "db":
@@ -136,13 +150,33 @@ async def _run(args: argparse.Namespace) -> None:
                 await upsert_jobs(jobs)
                 LOGGER.info("[DB MODE] Successfully upserted %d jobs for '%s' into MongoDB.", len(jobs), company)
 
-            # Pause between companies to keep CPU usage low
+            if args.delay_seconds > 0:
+                await asyncio.sleep(args.delay_seconds)
+
+        for url in urls:
+            LOGGER.info("[SEQUENTIAL] Processing company URL: %s", url)
+            jobs = await _scrape_company(
+                company=None,
+                company_url=url,
+                keyword=args.keyword,
+                location=args.location,
+                pages=args.pages,
+                page_size=args.page_size,
+                delay_seconds=args.delay_seconds,
+            )
+            total_scraped += len(jobs)
+            all_collected_jobs.extend(jobs)
+
+            if args.mode == "db" and jobs:
+                await upsert_jobs(jobs)
+                LOGGER.info("[DB MODE] Successfully upserted %d jobs for URL '%s' into MongoDB.", len(jobs), url)
+
             if args.delay_seconds > 0:
                 await asyncio.sleep(args.delay_seconds)
 
         LOGGER.info("=" * 60)
         LOGGER.info("SCRAPE SUMMARY | Mode: %s", args.mode.upper())
-        LOGGER.info("Total Jobs Scraped Across All Companies: %d", total_scraped)
+        LOGGER.info("Total Jobs Scraped Across All Targets: %d", total_scraped)
 
         if all_collected_jobs:
             LOGGER.info("\n--- FIRST 4 DATA POINTS PREVIEW ---\n%s\n---------------------------------", _format_jobs_preview(all_collected_jobs))
@@ -158,9 +192,10 @@ async def _run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sequential Playwright-free job scraper for Job Cafe.")
+    parser = argparse.ArgumentParser(description="Sequential Playwright-free job scraper for Job Nest.")
     parser.add_argument("--mode", choices=["local", "db"], default="local", help="Operation mode: local (dry run / preview) or db (upsert to MongoDB).")
     parser.add_argument("--companies", default="all", help="Comma-separated company slugs or 'all'.")
+    parser.add_argument("--company-url", default=None, help="Comma-separated company career page URLs to scrape (bypasses company name lookup).")
     parser.add_argument("--keyword", default=None, help="Filter jobs by keyword.")
     parser.add_argument("--location", default=None, help="Filter jobs by location.")
     parser.add_argument("--pages", type=int, default=2, help="Number of pages to scrape per company.")

@@ -66,7 +66,11 @@ Server starts at `http://localhost:8000`. Health check: `curl http://localhost:8
 ### 6. Scrape Some Jobs
 
 ```bash
+# By company name
 python scrapers/scrape_jobs.py --mode db --companies amazon,microsoft --pages 1
+
+# By career page URL (bypasses company name lookup)
+python scrapers/scrape_jobs.py --mode db --company-url "https://careers.google.com"
 ```
 
 ## Frontend Setup
