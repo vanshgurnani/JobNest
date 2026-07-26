@@ -72,6 +72,7 @@ _STATIC_EXTENSIONS = (
 
 _KNOWN_COMPANY_CAREERS_URLS = {
     "accenture": "https://www.accenture.com/in-en/careers/jobsearch",
+    "amazon": "https://www.amazon.jobs/en/search.json",
     "cognizant": "https://careers.cognizant.com/global-en/jobs/",
     "google": "https://www.google.com/about/careers/applications/jobs/results/",
     "infosys": "https://career.infosys.com/joblist",
@@ -494,12 +495,14 @@ async def _resolve_careers_page(*, company_name: str, company_url: str | None) -
         )
         return company_base, careers_url or urljoin(company_base + "/", "careers")
 
-    # 2) If company_url not provided, attempt common patterns by guessing domain from name.
-    # Keep conservative: we only use URLs on the guessed domain.
-    # NOTE: without a domain, this is inherently heuristic.
-    # We try to infer domain from company_name by stripping suffixes.
+    normalized_name = _clean_text(company_name).lower()
+    slug = _slugify_company_name(company_name)
+    known_url = _KNOWN_COMPANY_CAREERS_URLS.get(normalized_name) or _KNOWN_COMPANY_CAREERS_URLS.get(slug)
+    if known_url:
+        known_base = known_url[:known_url.index("/", 8)] if known_url.startswith("http") and "/" in known_url[8:] else known_url
+        return known_base, known_url
+
     name = company_name.strip()
-    # Try common: if name looks like 'company.com', use it
     if name.startswith("http"):
         return await _resolve_careers_page(company_name=company_name, company_url=name)
 
@@ -987,12 +990,28 @@ async def universal_crawl_jobs(
         except Exception as exc:
             logger.warning("Direct ATS crawl failed for %s (%s): %s", company_name, careers_url, exc)
 
-    # Fetch careers page HTML
     headers = _default_headers()
 
     await asyncio.sleep(0.15 + random.random() * 0.15)
+
+    fetch_url = careers_url
+    if _looks_like_json_api_url(careers_url):
+        qp: dict[str, Any] = {}
+        is_amazon = "amazon" in _host(careers_url)
+        if keyword:
+            qp["base_query" if is_amazon else "query"] = keyword
+        if location:
+            qp["loc_query" if is_amazon else "location"] = location
+        if page > 1:
+            qp["page"] = page
+        if limit:
+            qp["result_limit" if is_amazon else "limit"] = limit
+        if qp:
+            sep = "&" if "?" in fetch_url else "?"
+            fetch_url = fetch_url + sep + "&".join(f"{k}={v}" for k, v in qp.items())
+
     try:
-        html = await _fetch_html(careers_url, headers=headers)
+        html = await _fetch_html(fetch_url, headers=headers)
     except Exception as exc:
         logger.warning("Universal crawler could not fetch careers page for %s (%s): %s", company_name, careers_url, exc)
         ats = detect_ats(careers_url, "")
@@ -1012,7 +1031,14 @@ async def universal_crawl_jobs(
             logger.warning("ATS direct fallback failed for %s (%s): %s", company_name, careers_url, ats_exc)
             return []
 
-    # Detect ATS
+    try:
+        payload = json.loads(html)
+        logger.info("Careers URL returned JSON for %s — extracting directly", company_name)
+        jobs = await _extract_jobs_from_json_payload(payload, company_name, "json-api")
+        return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))[:limit]
+    except (ValueError, TypeError):
+        pass
+
     ats = detect_ats(careers_url, html)
     if ats:
         try:
