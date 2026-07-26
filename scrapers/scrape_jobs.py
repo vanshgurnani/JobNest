@@ -30,7 +30,16 @@ LOGGER = logging.getLogger("scrapers.scrape_jobs")
 def _parse_company_list(value: str | None) -> list[str]:
     if not value or value.strip().lower() == "all":
         return supported_companies()
-    return [part.strip().lower() for part in value.split(",") if part.strip()]
+    companies = [part.strip().lower() for part in value.split(",") if part.strip()]
+    known = set(supported_companies())
+    for c in companies:
+        if c not in known:
+            LOGGER.warning(
+                "Company '%s' is not in company_urls.json. The scraper will try to auto-discover "
+                "its careers page, but you can add it to scrapers/company_urls.json for best results.",
+                c,
+            )
+    return companies
 
 
 def _parse_url_list(value: str | None) -> list[str]:

@@ -21,23 +21,36 @@ def _strip_tags(value: str) -> str:
 
 
 def _looks_like_job_title(text: str, href: str) -> bool:
-    lowered = f"{text} {href}".lower()
+    text_lower = text.lower()
+    href_lower = href.lower()
+
+    _SKIP_TEXTS = {
+        "sign in", "sign up", "register", "log in", "login",
+        "english", "deutsch", "español", "français", "português",
+        "talent community", "search results", "previous", "next",
+    }
+    if any(skip in text_lower for skip in _SKIP_TEXTS):
+        return False
+    if re.search(r'locale\s*=', href_lower) or re.search(r'language\s*=', href_lower):
+        return False
+
     keywords = [
-        "engineer",
-        "developer",
-        "program",
-        "analyst",
-        "scientist",
-        "intern",
-        "manager",
-        "designer",
-        "product",
-        "support",
-        "operations",
+        "engineer", "developer", "program", "analyst", "scientist",
+        "intern", "manager", "designer", "product", "support",
+        "operations", "specialist", "coordinator", "consultant",
+        "associate", "director", "architect", "vp", "lead",
     ]
-    if any(keyword in lowered for keyword in keywords):
+    if any(keyword in text_lower for keyword in keywords):
         return True
-    return "/job" in lowered or "/jobs" in lowered or "career" in lowered
+
+    job_path_patterns = [
+        "/job/", "/jobs/", "/position/", "/requisition/",
+        "/opening/", "/careers/job", "/careers/position",
+    ]
+    if any(pattern in href_lower for pattern in job_path_patterns):
+        return True
+
+    return False
 
 
 def _matches_filter(job: dict[str, Any], *, keyword: str | None = None, location: str | None = None) -> bool:
@@ -72,6 +85,12 @@ def _extract_anchor_links(html: str) -> list[dict[str, str]]:
     return links
 
 
+def _is_client_error(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 400 <= exc.response.status_code < 500
+    return False
+
+
 async def request_with_retries(
     url: str,
     *,
@@ -82,22 +101,28 @@ async def request_with_retries(
     data: Any | None = None,
     timeout: float = 20.0,
     max_retries: int = 3,
+    client: httpx.AsyncClient | None = None,
 ) -> str:
+    if client is not None:
+        return await _request_with_client(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data, timeout=timeout, max_retries=max_retries)
+
     last_error: Exception | None = None
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 if method.upper() == "POST":
-                    response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+                    response = await c.post(url, params=params, headers=headers, json=json_data, data=data)
                 else:
-                    response = await client.get(url, params=params, headers=headers)
+                    response = await c.get(url, params=params, headers=headers)
                 response.raise_for_status()
                 return response.text
         except Exception as exc:
             last_error = exc
-            logger.warning("Request attempt %s failed for %s: %s", attempt + 1, url, exc)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(min(2**attempt, 4))
+            exc_msg = str(exc) or f"[{type(exc).__name__}]"
+            logger.warning("Request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            if _is_client_error(exc) or attempt >= max_retries - 1:
+                raise RuntimeError(str(last_error)) from last_error
+            await asyncio.sleep(min(2**attempt, 4))
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -111,20 +136,92 @@ async def request_json_with_retries(
     data: Any | None = None,
     timeout: float = 20.0,
     max_retries: int = 3,
+    client: httpx.AsyncClient | None = None,
 ) -> Any:
+    if client is not None:
+        return await _request_json_with_client(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data, timeout=timeout, max_retries=max_retries)
+
     last_error: Exception | None = None
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 if method.upper() == "POST":
-                    response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+                    response = await c.post(url, params=params, headers=headers, json=json_data, data=data)
                 else:
-                    response = await client.get(url, params=params, headers=headers)
+                    response = await c.get(url, params=params, headers=headers)
                 response.raise_for_status()
                 return response.json()
         except Exception as exc:
             last_error = exc
-            logger.warning("JSON request attempt %s failed for %s: %s", attempt + 1, url, exc)
+            exc_msg = str(exc) or f"[{type(exc).__name__}]"
+            logger.warning("JSON request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            if _is_client_error(exc) or attempt >= max_retries - 1:
+                raise RuntimeError(str(last_error)) from last_error
+            await asyncio.sleep(min(2**attempt, 4))
+            if attempt < max_retries - 1:
+                await asyncio.sleep(min(2**attempt, 4))
+    raise RuntimeError(str(last_error)) from last_error
+
+
+async def _request_with_client(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    method: str = "GET",
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    json_data: Any | None = None,
+    data: Any | None = None,
+    timeout: float = 20.0,
+    max_retries: int = 3,
+) -> str:
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            if method.upper() == "POST":
+                response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+            else:
+                response = await client.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            return response.text
+        except Exception as exc:
+            last_error = exc
+            exc_msg = str(exc) or f"[{type(exc).__name__}]"
+            logger.warning("Client request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            if _is_client_error(exc) or attempt >= max_retries - 1:
+                raise RuntimeError(str(last_error)) from last_error
+            await asyncio.sleep(min(2**attempt, 4))
+    raise RuntimeError(str(last_error)) from last_error
+
+
+async def _request_json_with_client(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    method: str = "GET",
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    json_data: Any | None = None,
+    data: Any | None = None,
+    timeout: float = 20.0,
+    max_retries: int = 3,
+) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            if method.upper() == "POST":
+                response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+            else:
+                response = await client.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            last_error = exc
+            exc_msg = str(exc) or f"[{type(exc).__name__}]"
+            logger.warning("Client JSON request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            if _is_client_error(exc) or attempt >= max_retries - 1:
+                raise RuntimeError(str(last_error)) from last_error
+            await asyncio.sleep(min(2**attempt, 4))
             if attempt < max_retries - 1:
                 await asyncio.sleep(min(2**attempt, 4))
     raise RuntimeError(str(last_error)) from last_error
@@ -190,15 +287,18 @@ async def crawl_ats_jobs(
     location: str | None = None,
     page: int = 1,
     limit: int | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     platform = ats_info["platform"]
     jobs = []
+
+    _rjr = lambda url, **kw: request_json_with_retries(url, client=client, **kw)
 
     if platform == "lever":
         token = ats_info["token"]
         url = f"https://api.lever.co/v0/postings/{token}?mode=json"
         try:
-            listings = await request_json_with_retries(url)
+            listings = await _rjr(url)
             if isinstance(listings, list):
                 for raw_job in listings:
                     job_id = raw_job.get("id") or ""
@@ -230,7 +330,7 @@ async def crawl_ats_jobs(
         token = ats_info["token"]
         url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
         try:
-            data = await request_json_with_retries(url)
+            data = await _rjr(url)
             listings = data.get("jobs") if isinstance(data, dict) else None
             if isinstance(listings, list):
                 for raw_job in listings:
@@ -259,7 +359,7 @@ async def crawl_ats_jobs(
         token = ats_info["token"]
         url = f"https://api.ashbyhq.com/posting-api/job-board/{token}"
         try:
-            data = await request_json_with_retries(url)
+            data = await _rjr(url)
             listings = data.get("jobs") if isinstance(data, dict) else None
             if isinstance(listings, list):
                 for raw_job in listings:
@@ -298,19 +398,43 @@ async def crawl_ats_jobs(
                 "searchText": keyword or "",
             }
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
-            data = await request_json_with_retries(search_url, method="POST", json_data=payload, headers=headers)
+            data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
             listings = data.get("jobPostings") if isinstance(data, dict) else None
             if isinstance(listings, list):
                 for raw_job in listings:
                     external_path = raw_job.get("externalPath") or ""
                     title = raw_job.get("title") or ""
                     job_location = raw_job.get("locationsText") or ""
+                    if re.search(r"^\d+\s+locations?$", job_location.strip(), re.IGNORECASE) or "multiple" in job_location.lower():
+                        loc_list = raw_job.get("locations")
+                        if isinstance(loc_list, list):
+                            names = []
+                            for loc in loc_list:
+                                if isinstance(loc, dict):
+                                    n = loc.get("descriptor") or loc.get("name") or loc.get("id") or ""
+                                    if n:
+                                        names.append(n)
+                            if names:
+                                job_location = ", ".join(names)
+                        else:
+                            parts = external_path.strip("/").split("/")
+                            if len(parts) >= 2 and parts[0] == "job":
+                                city = parts[1].replace("-", " ")
+                                count_match = re.search(r"(\d+)", job_location)
+                                if count_match:
+                                    count = int(count_match.group(1))
+                                    if count > 1:
+                                        job_location = f"{city} + {count - 1} more"
+                                    else:
+                                        job_location = city
+                                else:
+                                    job_location = f"{city} + more"
 
                     desc = ""
                     if external_path:
                         detail_url = f"https://{subdomain}.myworkdayjobs.com/wday/cxs/{tenant}/{board}{external_path}"
                         try:
-                            detail_data = await request_json_with_retries(detail_url, headers=headers)
+                            detail_data = await _rjr(detail_url, headers=headers)
                             if isinstance(detail_data, dict):
                                 desc = detail_data.get("jobPostingInfo", {}).get("jobDescription") or ""
                         except Exception as de:
@@ -343,7 +467,7 @@ async def crawl_ats_jobs(
             params["q"] = keyword
         url = f"https://api.smartrecruiters.com/v1/companies/{token}/postings"
         try:
-            data = await request_json_with_retries(url, params=params)
+            data = await _rjr(url, params=params)
             listings = data.get("content") if isinstance(data, dict) else None
             if isinstance(listings, list):
                 for raw_job in listings:
@@ -355,7 +479,7 @@ async def crawl_ats_jobs(
                     detail_url = f"https://api.smartrecruiters.com/v1/companies/{token}/postings/{job_id}"
                     desc = raw_job.get("jobAd", {}).get("sections", {}).get("jobDescription", {}).get("text") or ""
                     try:
-                        detail_data = await request_json_with_retries(detail_url)
+                        detail_data = await _rjr(detail_url)
                         if isinstance(detail_data, dict):
                             apply_url = detail_data.get("applyUrl") or detail_data.get("ref") or apply_url
                             detail_sections = detail_data.get("jobAd", {}).get("sections", {})
@@ -400,7 +524,7 @@ async def crawl_ats_jobs(
                 f"https://{domain}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
                 f"?onlyData=true&expand={expand}&finder={finder}"
             )
-            data = await request_json_with_retries(listings_url, headers=oracle_headers, timeout=30)
+            data = await _rjr(listings_url, headers=oracle_headers, timeout=30)
             items = data.get("items") or []
             if items:
                 search_item = items[0]
@@ -414,10 +538,9 @@ async def crawl_ats_jobs(
                     pf = f"findReqs;siteNumber={site},limit={limit_per_page},offset={offset}"
                     pu = f"https://{domain}/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&expand={expand}&finder={pf}"
                     try:
-                        pd = await request_json_with_retries(pu, headers=oracle_headers, timeout=30)
+                        pd = await _rjr(pu, headers=oracle_headers, timeout=30)
                         pi = pd.get("items") or []
-                        if pi:
-                            req_list.extend(pi[0].get("requisitionList") or [])
+
                     except Exception:
                         pass
                     if len(req_list) >= need:

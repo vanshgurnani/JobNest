@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -7,9 +9,26 @@ from app.services.job_store import find_companies, find_job_by_id, find_jobs
 
 router = APIRouter(prefix="", tags=["jobs"])
 
-SUPPORTED_COMPANIES = [
-    "amazon", "meta", "microsoft", "tca", "kpmg", "jpmorgan", "wipro",
-]
+
+def _load_supported_companies() -> list[str]:
+    _path = Path(__file__).resolve().parents[2] / "scrapers" / "company_urls.json"
+    companies: list[str] = []
+    if _path.exists():
+        try:
+            raw = json.loads(_path.read_text(encoding="utf-8"))
+            for key in raw:
+                if not key.startswith("_"):
+                    companies.append(key)
+        except Exception:
+            pass
+    return companies or [
+        "accenture", "amazon", "apple", "cisco", "cognizant", "deloitte",
+        "google", "hcl", "ibm", "infosys", "jpmorgan", "kpmg",
+        "mastercard", "meta", "microsoft", "oracle", "tcs", "wipro", "zoho",
+    ]
+
+
+SUPPORTED_COMPANIES = _load_supported_companies()
 
 
 @router.get("/companies")

@@ -1,0 +1,67 @@
+{
+  "_comment": "Company careers page URL mappings. Add any company here to enable scraping.",
+  "_format": "Key: company name (lowercase). Value: careers/jobs page URL.",
+  "_tips": [
+    "To find a company's careers URL:",
+    "  - Search Google for '{company} careers job'",
+    "  - Look for URLs containing: workday, greenhouse, lever, oraclecloud, ashby",
+    "  - These ATS platforms are auto-detected and work best",
+    "  - JS-only career portals (React/Angular SPAs) won't work without Playwright"
+  ],
+
+  "accenture": "https://www.accenture.com/in-en/careers/jobsearch",
+  "amazon": "https://www.amazon.jobs/en/search.json",
+  "apple": "https://jobs.apple.com/en-us/search",
+  "capgemini": "https://www.capgemini.com/in-en/careers/",
+  "cisco": "https://jobs.cisco.com",
+  "cognizant": "https://careers.cognizant.com/global-en/jobs/",
+  "deloitte": "https://jobsindia.deloitte.com/search/?q=&locationsearch=India",
+  "google": "https://www.google.com/about/careers/applications/jobs/results/",
+  "ibm": "https://www.ibm.com/careers/search",
+  "infosys": "https://career.infosys.com/joblist",
+  "jpmorgan": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
+  "ltimindtree": "https://www.ltimindtree.com/careers/",
+  "mastercard": "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers",
+  "meta": "https://www.metacareers.com/jobs",
+  "microsoft": "https://careers.microsoft.com/us/en/search-results",
+  "nvidia": "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite",
+  "oracle": "https://oracle.wd12.myworkdayjobs.com/ORCL_External_Careers",
+  "salesforce": "https://careers.salesforce.com/en-us/jobs/",
+  "sap": "https://www.sap.com/careers.html",
+  "techmahindra": "https://careers.techmahindra.com/",
+  "tcs": "https://www.tcs.com/careers",
+  "wipro": "https://careers.wipro.com/viewalljobs/?locale=en_US",
+  "zoho": "https://www.zoho.com/careers/",
+
+  "adobe": "https://adobe.wd5.myworkdayjobs.com/external_experienced",
+  "amd": "https://amd.wd5.myworkdayjobs.com/external",
+  "dell": "https://dell.wd5.myworkdayjobs.com/Dell_Careers",
+  "hp": "https://hp.wd5.myworkdayjobs.com/HPCareers",
+  "kpmg": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
+  "mckinsey": "https://mckinsey.wd1.myworkdayjobs.com/McKinseyCareers",
+  "vmware": "https://vmware.wd1.myworkdayjobs.com/VMware_Careers",
+
+  "airbnb": "https://careers.airbnb.com/",
+  "datadog": "https://www.datadoghq.com/careers/",
+  "shopify": "https://www.shopify.com/careers",
+  "stripe": "https://stripe.com/jobs",
+  "gitlab": "https://about.gitlab.com/jobs/",
+  "notion": "https://www.notion.so/careers",
+
+  "bain": "https://www.bain.com/careers/",
+  "boston consulting group": "https://careers.bcg.com/search",
+  "ey": "https://eyglobal.yello.co/jobs/",
+  "goldman sachs": "https://www.goldmansachs.com/careers/",
+  "pwc": "https://www.pwc.com/gx/en/careers.html",
+
+  "_aliases": {
+    "jpm": "jpmorgan",
+    "jp morgan": "jpmorgan",
+    "j.p. morgan": "jpmorgan",
+    "tca": "tcs",
+    "tata": "tcs",
+    "kpmg jp": "kpmg",
+    "bcg": "boston consulting group",
+    "goldman": "goldman sachs"
+  }
+}

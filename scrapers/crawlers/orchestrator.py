@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 import logging
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -18,7 +20,23 @@ def _company_name_from_url(company_url: str) -> str:
 
 
 def supported_companies() -> list[str]:
-    return []
+    _path = Path(__file__).resolve().parent.parent / "company_urls.json"
+    companies: list[str] = []
+    if _path.exists():
+        try:
+            raw = json.loads(_path.read_text(encoding="utf-8"))
+            for key in raw:
+                if not key.startswith("_"):
+                    companies.append(key)
+        except Exception:
+            pass
+    if not companies:
+        companies = [
+            "accenture", "amazon", "apple", "cisco", "cognizant", "deloitte",
+            "google", "hcl", "ibm", "infosys", "jpmorgan", "kpmg",
+            "mastercard", "meta", "microsoft", "oracle", "tcs", "wipro", "zoho",
+        ]
+    return companies
 
 
 def _enrich_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
