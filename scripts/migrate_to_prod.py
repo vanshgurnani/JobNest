@@ -9,7 +9,8 @@ Environment variables:
     TARGET_MONGO_URI   — target MongoDB connection string
     TARGET_MONGO_DB    — target database name
 """
-
+from dotenv import load_dotenv
+load_dotenv()
 import asyncio
 import os
 import sys
