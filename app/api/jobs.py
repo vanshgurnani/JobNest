@@ -6,8 +6,11 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.services.cache import build_cache_key, crawl_cache
 from app.services.job_store import find_companies, find_job_by_id, find_jobs
+from app.services.security import is_safe_url
 
 router = APIRouter(prefix="", tags=["jobs"])
+
+_MAX_SEARCH_LENGTH = 200
 
 
 def _load_supported_companies() -> list[str]:
@@ -23,12 +26,30 @@ def _load_supported_companies() -> list[str]:
             pass
     return companies or [
         "accenture", "amazon", "apple", "cisco", "cognizant", "deloitte",
-        "google", "hcl", "ibm", "infosys", "jpmorgan", "kpmg",
-        "mastercard", "meta", "microsoft", "oracle", "tcs", "wipro", "zoho",
+        "google", "ibm", "infosys", "jpmorgan", "kpmg",
+        "mastercard", "meta", "microsoft", "oracle", "tcs", "wipro",
     ]
 
 
 SUPPORTED_COMPANIES = _load_supported_companies()
+
+
+def _validate_search_param(value: Optional[str], name: str) -> Optional[str]:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if len(stripped) > _MAX_SEARCH_LENGTH:
+        raise HTTPException(status_code=400, detail=f"{name} exceeds maximum length")
+    return stripped
+
+
+def _validate_company_url(url: Optional[str]) -> Optional[str]:
+    if url is None:
+        return None
+    safe, reason = is_safe_url(url)
+    if not safe:
+        raise HTTPException(status_code=400, detail=f"Invalid company_url: {reason}")
+    return url
 
 
 @router.get("/companies")
@@ -49,19 +70,24 @@ async def _cache_response(key: str, payload: dict) -> dict:
 
 @router.get("/jobs")
 async def get_jobs(
-    company: Optional[str] = Query(default=None, description="Optional company filter"),
-    company_url: Optional[str] = Query(default=None, description="Optional official company careers/base URL"),
-    keyword: Optional[str] = Query(default=None, description="Optional keyword filter"),
-    location: Optional[str] = Query(default=None, description="Optional location filter"),
-    page: int = Query(default=1, ge=1, description="Pagination page (1-indexed)"),
-    limit: int = Query(default=20, ge=1, le=100, description="Page size"),
+    company: Optional[str] = Query(default=None, max_length=_MAX_SEARCH_LENGTH),
+    company_url: Optional[str] = Query(default=None, max_length=2048),
+    keyword: Optional[str] = Query(default=None, max_length=_MAX_SEARCH_LENGTH),
+    location: Optional[str] = Query(default=None, max_length=_MAX_SEARCH_LENGTH),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
+    company_valid = _validate_search_param(company, "Company")
+    company_url_valid = _validate_company_url(company_url)
+    keyword_valid = _validate_search_param(keyword, "Keyword")
+    location_valid = _validate_search_param(location, "Location")
+
     cache_key = build_cache_key(
         route="jobs",
-        company=company,
-        company_url=company_url,
-        keyword=keyword,
-        location=location,
+        company=company_valid,
+        company_url=company_url_valid,
+        keyword=keyword_valid,
+        location=location_valid,
         page=page,
         limit=limit,
     )
@@ -72,18 +98,15 @@ async def get_jobs(
 
     try:
         jobs, total = await find_jobs(
-            company=company,
-            keyword=keyword,
-            location=location,
+            company=company_valid,
+            keyword=keyword_valid,
+            location=location_valid,
             page=page,
             limit=limit,
             fresh_only=False,
         )
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Job database is not available. Run the scraper in db mode before serving the portal.",
-        ) from exc
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Job database is not available")
 
     return await _cache_response(cache_key, {
         "total": total,
@@ -95,23 +118,26 @@ async def get_jobs(
     })
 
 
-
 @router.get("/jobs/{company}")
 async def get_company_jobs(
     company: str,
-    company_url: Optional[str] = Query(default=None, description="Optional official company careers/base URL"),
-    keyword: Optional[str] = Query(default=None, description="Optional keyword filter"),
-    location: Optional[str] = Query(default=None, description="Optional location filter"),
-    page: int = Query(default=1, ge=1, description="Pagination page (1-indexed)"),
-    limit: int = Query(default=20, ge=1, le=100, description="Page size"),
+    company_url: Optional[str] = Query(default=None, max_length=2048),
+    keyword: Optional[str] = Query(default=None, max_length=_MAX_SEARCH_LENGTH),
+    location: Optional[str] = Query(default=None, max_length=_MAX_SEARCH_LENGTH),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
-    company_key = company.lower()
+    company_key = _validate_search_param(company, "Company")
+    company_url_valid = _validate_company_url(company_url)
+    keyword_valid = _validate_search_param(keyword, "Keyword")
+    location_valid = _validate_search_param(location, "Location")
+
     cache_key = build_cache_key(
         route="company_jobs",
         company=company_key,
-        company_url=company_url,
-        keyword=keyword,
-        location=location,
+        company_url=company_url_valid,
+        keyword=keyword_valid,
+        location=location_valid,
         page=page,
         limit=limit,
     )
@@ -123,17 +149,14 @@ async def get_company_jobs(
     try:
         jobs, total = await find_jobs(
             company=company_key,
-            keyword=keyword,
-            location=location,
+            keyword=keyword_valid,
+            location=location_valid,
             page=page,
             limit=limit,
             fresh_only=False,
         )
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Job database is not available. Run the scraper in db mode before serving the portal.",
-        ) from exc
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Job database is not available")
 
     return await _cache_response(cache_key, {
         "company": jobs[0].get("company", company.title()) if jobs else company.title(),
@@ -154,8 +177,8 @@ async def get_job_detail(job_id: str) -> dict:
 
     try:
         job = await find_job_by_id(job_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail="Job detail storage is not available") from exc
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Job detail storage is not available")
 
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

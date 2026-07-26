@@ -41,10 +41,6 @@ async def _ensure_indexes() -> None:
     await db.jobs.create_index("id", unique=True)
     await db.jobs.create_index([("company", 1), ("crawled_at", -1)])
     await db.jobs.create_index("title")
-    await db.users.create_index("email", unique=True)
-    await db.saved_jobs.create_index([("user_id", 1), ("job_id", 1)], unique=True)
-    await db.saved_jobs.create_index([("user_id", 1), ("saved_at", -1)])
-    await db.search_history.create_index([("user_id", 1), ("searched_at", -1)])
 
 
 async def ping_mongo() -> dict[str, Any]:

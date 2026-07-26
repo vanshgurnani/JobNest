@@ -16,11 +16,7 @@ class Settings:
     mongodb_uri: str = os.getenv("MONGO_URI")
     mongodb_db: str = os.getenv("MONGO_DB_NAME")
 
-    jwt_secret: str = os.getenv("JWT_SECRET", "change-me-in-production")
-    jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))  # 7 days
-
-    cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "900"))  # 15 min
+    cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "900"))
     cache_max_entries: int = int(os.getenv("CACHE_MAX_ENTRIES", "512"))
 
     cors_origins: list[str] = [
