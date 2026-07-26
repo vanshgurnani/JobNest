@@ -1,34 +1,51 @@
+"""
+Usage:
+    # Copy between two Atlas clusters (or local → Atlas)
+    python scripts/migrate_to_prod.py
+
+Environment variables:
+    SOURCE_MONGO_URI   — source MongoDB connection string (default: MONGODB_URI)
+    SOURCE_MONGO_DB    — source database name (default: MONGODB_DB)
+    TARGET_MONGO_URI   — target MongoDB connection string
+    TARGET_MONGO_DB    — target database name
+"""
+
 import asyncio
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-os.environ.setdefault("MONGODB_URI", "mongodb://localhost:27017")
-os.environ.setdefault("MONGODB_DB", "job_portal")
 
 from motor.motor_asyncio import AsyncIOMotorClient
-from app.config import get_settings
 from app.schemas.job import canonicalize_job
 
-PROD_URI = os.getenv("PROD_MONGO_URI", "mongodb://localhost:27017")
-PROD_DB = os.getenv("PROD_MONGO_DB", "job_intelligence")
+SOURCE_URI = os.getenv("SOURCE_MONGO_URI") or os.getenv("MONGODB_URI", "")
+SOURCE_DB = os.getenv("SOURCE_MONGO_DB") or os.getenv("MONGODB_DB", "job_portal")
+TARGET_URI = os.getenv("TARGET_MONGO_URI") or os.getenv("PROD_MONGO_URI", "")
+TARGET_DB = os.getenv("TARGET_MONGO_DB") or os.getenv("PROD_MONGO_DB", "job_intelligence")
 
 
 async def migrate():
-    src_settings = get_settings()
-    src_client = AsyncIOMotorClient(src_settings.mongodb_uri)
-    src_coll = src_client[src_settings.mongodb_db]["jobs"]
+    if not SOURCE_URI:
+        raise SystemExit("Set SOURCE_MONGO_URI (or MONGODB_URI) env var.")
+    if not TARGET_URI:
+        raise SystemExit("Set TARGET_MONGO_URI (or PROD_MONGO_URI) env var.")
 
-    tgt_client = AsyncIOMotorClient(PROD_URI)
-    tgt_coll = tgt_client[PROD_DB]["jobs"]
+    src_client = AsyncIOMotorClient(SOURCE_URI, serverSelectionTimeoutMS=10000)
+    tgt_client = AsyncIOMotorClient(TARGET_URI, serverSelectionTimeoutMS=10000)
+
+    await src_client.admin.command("ping")
+    await tgt_client.admin.command("ping")
+
+    src_coll = src_client[SOURCE_DB]["jobs"]
+    tgt_coll = tgt_client[TARGET_DB]["jobs"]
 
     total = await src_coll.count_documents({})
-    print(f"Source: {src_settings.mongodb_uri}/{src_settings.mongodb_db}  ({total} jobs)")
-    print(f"Target: {PROD_URI}/{PROD_DB}")
+    print(f"Source: {total} jobs from {SOURCE_DB}")
+    print(f"Target: {TARGET_DB}")
 
     cursor = src_coll.find({})
     inserted = 0
-    skipped = 0
     batch: list[dict] = []
     async for doc in cursor:
         doc.pop("_id", None)
@@ -48,7 +65,7 @@ async def migrate():
 
     src_client.close()
     tgt_client.close()
-    print(f"Done. {inserted} jobs migrated, {skipped} skipped.")
+    print(f"Done. {inserted} jobs migrated.")
 
 
 if __name__ == "__main__":

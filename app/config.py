@@ -12,8 +12,8 @@ def get_settings() -> "Settings":
 class Settings:
     """Application settings loaded from environment variables."""
 
-    mongodb_uri: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-    mongodb_db: str = os.getenv("MONGODB_DB", "job_portal")
+    mongodb_uri: str = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI") or "mongodb://localhost:27017"
+    mongodb_db: str = os.getenv("MONGODB_DB") or os.getenv("MONGO_DB_NAME") or "job_portal"
 
     jwt_secret: str = os.getenv("JWT_SECRET", "change-me-in-production")
     jwt_algorithm: str = "HS256"
