@@ -1,8 +1,0 @@
-amazon
-meta
-microsoft
-tca
-kpmg
-jpmorgan
-wipro
-

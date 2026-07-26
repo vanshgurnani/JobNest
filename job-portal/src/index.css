@@ -41,3 +41,30 @@
     @apply animate-pulse rounded bg-surface-tertiary;
   }
 }
+
+@layer utilities {
+  .bg-grid-pattern {
+    background-image:
+      linear-gradient(rgba(59, 130, 246, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(59, 130, 246, 0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .bg-gradient-mesh {
+    background:
+      radial-gradient(ellipse 80% 60% at 0% 20%, rgba(59, 130, 246, 0.15) 0%, transparent 50%),
+      radial-gradient(ellipse 60% 50% at 100% 40%, rgba(37, 99, 235, 0.1) 0%, transparent 50%),
+      radial-gradient(ellipse 50% 40% at 50% 80%, rgba(219, 234, 254, 0.2) 0%, transparent 50%);
+  }
+
+  .hero-glow {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(80px);
+    pointer-events: none;
+  }
+
+  .glass-card {
+    @apply border border-white/20 bg-white/70 shadow-lg backdrop-blur-xl;
+  }
+}
