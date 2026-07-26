@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.jobs import router as jobs_router
 from app.config import get_settings
 from app.db.mongo import close_mongo, connect_mongo, ping_mongo
+from app.services.security import RateLimitMiddleware, SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ async def lifespan(app: FastAPI):
     try:
         await connect_mongo()
         app.state.mongo_available = True
-    except Exception as exc:  # pragma: no cover - depends on local service availability
+    except Exception as exc:
         logger.warning("MongoDB unavailable; running with live crawl + memory cache only: %s", exc)
         app.state.mongo_available = False
 
@@ -36,6 +37,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 
 @app.route("/health", methods=["GET", "HEAD"])

@@ -11,6 +11,18 @@ from app.db.mongo import get_db
 from app.schemas.job import canonicalize_job
 
 
+_MAX_INPUT_LENGTH = 200
+
+
+def _validate_search_input(value: str | None, label: str) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if len(stripped) > _MAX_INPUT_LENGTH:
+        raise ValueError(f"{label} exceeds maximum length of {_MAX_INPUT_LENGTH}")
+    return stripped
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -32,17 +44,19 @@ def _build_filter(
     fresh_only: bool = False,
 ) -> dict[str, Any]:
     query: dict[str, Any] = {}
+    company = _validate_search_input(company, "Company")
+    keyword = _validate_search_input(keyword, "Keyword")
+    location = _validate_search_input(location, "Location")
     if company:
-        query["company"] = {"$regex": f"^{re.escape(company.strip())}$", "$options": "i"}
+        query["company"] = {"$regex": f"^{re.escape(company)}$", "$options": "i"}
     if keyword:
-        escaped = re.escape(keyword.strip())
+        escaped = re.escape(keyword)
         query["$or"] = [
             {"title": {"$regex": escaped, "$options": "i"}},
-            {"description": {"$regex": escaped, "$options": "i"}},
             {"skills": {"$regex": escaped, "$options": "i"}},
         ]
     if location:
-        query["location"] = {"$regex": re.escape(location.strip()), "$options": "i"}
+        query["location"] = {"$regex": re.escape(location), "$options": "i"}
     if fresh_only:
         ttl = get_settings().cache_ttl_seconds
         query["crawled_at"] = {"$gte": _now() - timedelta(seconds=ttl)}
