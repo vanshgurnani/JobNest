@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+from dotenv import load_dotenv 
+load_dotenv()
 import os
 from functools import lru_cache
 
@@ -12,8 +13,8 @@ def get_settings() -> "Settings":
 class Settings:
     """Application settings loaded from environment variables."""
 
-    mongodb_uri: str = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI") or "mongodb://localhost:27017"
-    mongodb_db: str = os.getenv("MONGODB_DB") or os.getenv("MONGO_DB_NAME") or "job_portal"
+    mongodb_uri: str = os.getenv("MONGO_URI")
+    mongodb_db: str = os.getenv("MONGO_DB_NAME")
 
     jwt_secret: str = os.getenv("JWT_SECRET", "change-me-in-production")
     jwt_algorithm: str = "HS256"

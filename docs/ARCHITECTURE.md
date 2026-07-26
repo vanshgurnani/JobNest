@@ -26,10 +26,7 @@
 │   ├── scrape_jobs.py               # CLI entry point (argparse)
 │   └── crawlers/
 │       ├── base.py                  # HTTP retry, ATS detection, normalization
-│       ├── orchestrator.py          # Crawler registry & dispatch
-│       ├── amazon.py                # Amazon Jobs API
-│       ├── microsoft.py             # Microsoft PCSX API + skills
-│       ├── meta.py                  # Meta GraphQL + HTML
+│       ├── orchestrator.py          # Universal crawler dispatcher
 │       └── universal.py             # Universal ATS-aware crawler
 │
 ├── job-portal/                      # React Frontend
@@ -86,8 +83,8 @@
 ### Scraping Engine
 
 - **Modes**: `local` (dry-run preview to stdout) and `db` (MongoDB upsert)
-- **Strategy**: Company-specific crawlers first (Amazon, Microsoft, Meta), universal fallback for unknown
-- **URL-based scraping**: Pass any career page URL via `--company-url` — bypasses company name lookup, infers company from domain, and uses the universal ATS-aware crawler
+- **Strategy**: Single universal crawler handles all companies via ATS detection and dynamic extraction
+- **URL-based scraping**: Pass any career page URL via `--company-url` — infers company from domain and uses the universal ATS-aware crawler
 - **Deduplication**: SHA-256 hash of (company + job_id/apply_url/title+location)
 - **ATS detection**: Lever, Greenhouse, Ashby, Workday, SmartRecruiters via URL + HTML patterns
 - **Retry**: Exponential backoff, 3 retries

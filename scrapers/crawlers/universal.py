@@ -22,6 +22,9 @@ from scrapers.crawlers.base import (
 
 logger = logging.getLogger(__name__)
 
+AMAZON_MAX_PER_PAGE = 100
+AMAZON_JOBS_DOMAIN = "https://www.amazon.jobs"
+
 _UNOFFICIAL_JOB_DOMAINS = (
     "indeed.com",
     "linkedin.com",
@@ -72,6 +75,7 @@ _STATIC_EXTENSIONS = (
 
 _KNOWN_COMPANY_CAREERS_URLS = {
     "accenture": "https://www.accenture.com/in-en/careers/jobsearch",
+    "amazon": "https://www.amazon.jobs/en/search.json",
     "cognizant": "https://careers.cognizant.com/global-en/jobs/",
     "google": "https://www.google.com/about/careers/applications/jobs/results/",
     "infosys": "https://career.infosys.com/joblist",
@@ -477,6 +481,13 @@ async def _resolve_careers_page(*, company_name: str, company_url: str | None) -
         )
         return company_base, careers_url or urljoin(company_base + "/", "careers")
 
+    normalized_name = _clean_text(company_name).lower()
+    slug = _slugify_company_name(company_name)
+    known_url = _KNOWN_COMPANY_CAREERS_URLS.get(normalized_name) or _KNOWN_COMPANY_CAREERS_URLS.get(slug)
+    if known_url:
+        known_base = known_url[:known_url.index("/", 8)] if known_url.startswith("http") and "/" in known_url[8:] else known_url
+        return known_base, known_url
+
     name = company_name.strip()
     if name.startswith("http"):
         return await _resolve_careers_page(company_name=company_name, company_url=name)
@@ -484,7 +495,6 @@ async def _resolve_careers_page(*, company_name: str, company_url: str | None) -
     if "." in name and " " not in name:
         return await _resolve_careers_page(company_name=company_name, company_url=name)
 
-    slug = _slugify_company_name(name)
     if not slug:
         raise ValueError("Unable to resolve company URL")
 
@@ -862,6 +872,103 @@ async def _extract_jobs_by_fallback(company: str, careers_url: str, company_base
     return jobs
 
 
+async def _extract_jobs_with_playwright(
+    url: str,
+    company: str,
+    *,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        logger.info("Playwright not installed - skipping browser render for %s", url)
+        return []
+
+    api_responses: list[dict[str, Any]] = []
+    rendered_html: str | None = None
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                )
+            )
+            page_obj = await context.new_page()
+
+            async def handle_response(response):
+                content_type = response.headers.get("content-type", "")
+                if "json" in content_type:
+                    try:
+                        body = await response.json()
+                        if body:
+                            api_responses.append(body)
+                    except Exception:
+                        pass
+
+            page_obj.on("response", handle_response)
+
+            await page_obj.goto(url, wait_until="networkidle", timeout=30000)
+            await page_obj.wait_for_timeout(2000)
+
+            rendered_html = await page_obj.content()
+            await browser.close()
+    except Exception as exc:
+        logger.warning("Playwright extraction failed for %s: %s", url, exc)
+        return []
+
+    all_jobs: list[dict[str, Any]] = []
+
+    for payload in api_responses:
+        extracted = await _extract_jobs_from_json_payload(payload, company, "playwright-api")
+        for job in extracted:
+            if job.get("title"):
+                all_jobs.append(job)
+
+    if not all_jobs and rendered_html:
+        ats = detect_ats(url, rendered_html)
+        if ats:
+            try:
+                jobs = await crawl_ats_jobs(ats, company, keyword=keyword, location=location, page=page, limit=limit)
+                all_jobs.extend(jobs)
+            except Exception:
+                pass
+        if not all_jobs:
+            from scrapers.crawlers.base import extract_jobs_from_html as extract_html
+
+            html_jobs = extract_html(rendered_html, company=company, base_url=url)
+            for j in html_jobs:
+                if j.get("title"):
+                    all_jobs.append(normalize_job_payload(j, company, "playwright-html"))
+
+        if not all_jobs:
+            jsonld = _extract_jsonld_jobpostings(rendered_html)
+            for j in jsonld:
+                parsed = _parse_jsonld_jobposting(j)
+                if parsed.get("title"):
+                    all_jobs.append(
+                        normalize_job_payload(
+                            {
+                                "job_id": parsed.get("job_id"),
+                                "title": parsed.get("title"),
+                                "location": parsed.get("location"),
+                                "description": parsed.get("description"),
+                                "apply_url": parsed.get("apply_url"),
+                            },
+                            company,
+                            "playwright-jsonld",
+                        )
+                    )
+
+    return all_jobs[:limit]
+
+
 def _is_expired(job: dict[str, Any]) -> bool:
     blob = (job.get("title", "") + " " + job.get("description", "")).lower()
     if any(k in blob for k in ("expired", "closed", "no longer accepting", "position filled", "removed")):
@@ -905,6 +1012,67 @@ def _normalize_universal_output(jobs: list[dict[str, Any]], *, company: str, car
     return normalized_jobs
 
 
+async def _crawl_amazon_jobs(
+    careers_url: str,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    qp: dict[str, Any] = {"result_limit": AMAZON_MAX_PER_PAGE}
+    if keyword:
+        qp["base_query"] = keyword
+    if location:
+        qp["location[]"] = location
+
+    sep = "&" if "?" in careers_url else "?"
+    build_url = lambda **extra: careers_url + sep + "&".join(f"{k}={v}" for k, v in {**qp, **extra}.items())
+
+    headers = _default_headers()
+
+    def _try_parse(resp: str) -> dict | None:
+        try:
+            return json.loads(resp)
+        except (ValueError, TypeError):
+            return None
+
+    html = await _fetch_html(build_url(), headers=headers)
+    payload = _try_parse(html)
+    if payload is None:
+        logger.warning("Amazon jobs API returned non-JSON (rate-limited or busy)")
+        return []
+
+    total_hits = int(payload.get("hits", 0))
+    all_jobs_data = list(payload.get("jobs") or [])
+
+    offsets = list(range(AMAZON_MAX_PER_PAGE, total_hits, AMAZON_MAX_PER_PAGE))
+    for o in offsets:
+        await asyncio.sleep(0.25 + random.random() * 0.15)
+        page_html = await _fetch_html(build_url(offset=o), headers=headers)
+        page_payload = _try_parse(page_html)
+        if page_payload is not None:
+            all_jobs_data.extend(page_payload.get("jobs") or [])
+
+    jobs = []
+    for j in all_jobs_data:
+        job_path = j.get("job_path", "")
+        jobs.append({
+            "title": j.get("title"),
+            "location": j.get("location") or "",
+            "city": j.get("city") or "",
+            "country": j.get("country_code") or "",
+            "job_id": str(j.get("id", "")),
+            "url": urljoin(AMAZON_JOBS_DOMAIN, job_path) if job_path else "",
+            "apply_url": urljoin(AMAZON_JOBS_DOMAIN, job_path) if job_path else "",
+            "description": (j.get("description_short") or "").strip(),
+            "posted_date": j.get("posted_date"),
+            "source": "amazon",
+        })
+
+    start = (page - 1) * limit
+    return jobs[start:start + limit]
+
+
 async def universal_crawl_jobs(
     *,
     company_name: str,
@@ -933,8 +1101,35 @@ async def universal_crawl_jobs(
 
     headers = _default_headers()
     await asyncio.sleep(0.15 + random.random() * 0.15)
+
+    is_amazon = "amazon" in _host(careers_url)
+    if is_amazon and _looks_like_json_api_url(careers_url):
+        jobs = await _crawl_amazon_jobs(
+            careers_url,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+        )
+        return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))
+
+    fetch_url = careers_url
+    if _looks_like_json_api_url(careers_url):
+        qp: dict[str, Any] = {}
+        if keyword:
+            qp["query"] = keyword
+        if location:
+            qp["location"] = location
+        if page > 1:
+            qp["page"] = page
+        if limit:
+            qp["limit"] = limit
+        if qp:
+            sep = "&" if "?" in fetch_url else "?"
+            fetch_url = fetch_url + sep + "&".join(f"{k}={v}" for k, v in qp.items())
+
     try:
-        html = await _fetch_html(careers_url, headers=headers)
+        html = await _fetch_html(fetch_url, headers=headers)
     except Exception as exc:
         logger.warning("Universal crawler could not fetch careers page for %s (%s): %s", company_name, careers_url, exc)
         ats = detect_ats(careers_url, "")
@@ -953,6 +1148,14 @@ async def universal_crawl_jobs(
         except Exception as ats_exc:
             logger.warning("ATS direct fallback failed for %s (%s): %s", company_name, careers_url, ats_exc)
             return []
+
+    try:
+        payload = json.loads(html)
+        logger.info("Careers URL returned JSON for %s — extracting directly", company_name)
+        jobs = await _extract_jobs_from_json_payload(payload, company_name, "json-api")
+        return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))[:limit]
+    except (ValueError, TypeError):
+        pass
 
     ats = detect_ats(careers_url, html)
     if ats:
@@ -997,6 +1200,20 @@ async def universal_crawl_jobs(
             location=location,
             max_secondary_per_page=5,
         )
+
+    if not jobs:
+        logger.info("HTML extraction yielded no jobs for %s — trying Playwright render", company_name)
+        pw_jobs = await _extract_jobs_with_playwright(
+            careers_url,
+            company_name,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+        )
+        if pw_jobs:
+            logger.info("Playwright found %d jobs for %s", len(pw_jobs), company_name)
+            jobs = pw_jobs
 
     if page > 1:
         params_to_try = [

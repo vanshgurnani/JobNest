@@ -65,19 +65,13 @@ Server starts at `http://localhost:8000`. Health check: `curl http://localhost:8
 
 ### 6. Scrape Some Jobs
 
-**Scrape by company name** (uses registered crawlers for amazon, microsoft, meta):
-
-```bash
-python scrapers/scrape_jobs.py --mode db --companies amazon,microsoft --pages 1
-```
-
-**Scrape by career page URL** (smart routing → company-specific → ATS → generic fallback):
+**Scrape by career page URL** (smart routing → ATS → generic fallback):
 
 ```bash
 python scrapers/scrape_jobs.py --mode db --company-url "https://careers.google.com"
 ```
 
-**Scrape with generic scraper only** (skips registered crawlers):
+**Scrape with generic scraper only** (skips ATS routing):
 
 ```bash
 python scrapers/scrape_jobs.py --mode db --generic-only --company-url "https://jobs.apple.com/en-in/search"
@@ -88,14 +82,13 @@ python scrapers/scrape_jobs.py --mode db --generic-only --company-url "https://j
 | Argument | Default | Description |
 |---|---|---|
 | `--mode` | `local` | `local` (preview) or `db` (MongoDB) |
-| `--companies` | `all` | Comma-separated slugs or `all` |
 | `--company-url` | — | Comma-separated career page URLs |
 | `--keyword` | — | Keyword filter |
 | `--location` | — | Location filter |
 | `--pages` | `2` | Pages per target |
 | `--page-size` | `20` | Items per page |
 | `--delay-seconds` | `0.5` | Delay between requests |
-| `--generic-only` | `False` | Force generic scraper, skip registered crawlers |
+| `--generic-only` | `False` | Force generic scraper, skip ATS routing |
 
 ## Frontend Setup
 
@@ -163,4 +156,4 @@ pytest tests/ -v
 **Scraper finds no jobs:**
 - Verify internet connectivity
 - Try `local` mode first to debug
-- Check company-specific crawler configuration
+- Check the company URL is reachable

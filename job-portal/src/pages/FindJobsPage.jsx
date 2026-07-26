@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Filters from '../components/Filters';
 import JobCard from '../components/JobCard';
@@ -6,7 +6,7 @@ import SkeletonCard from '../components/SkeletonCard';
 import Pagination from '../components/Pagination';
 import EmptyState from '../components/EmptyState';
 import ErrorState from '../components/ErrorState';
-import { fetchJobs } from '../services/api';
+import { fetchJobs, fetchCompanies } from '../services/api';
 
 const PAGE_SIZE = 20;
 
@@ -23,6 +23,51 @@ export default function FindJobsPage() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [allCompanies, setAllCompanies] = useState([]);
+  const [companyInput, setCompanyInput] = useState(company);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [filteredCompanies, setFilteredCompanies] = useState([]);
+  const companyRef = useRef(null);
+
+  useEffect(() => {
+    fetchCompanies().then(setAllCompanies).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setCompanyInput(company);
+  }, [company]);
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (companyRef.current && !companyRef.current.contains(e.target)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  function handleCompanyInputChange(value) {
+    setCompanyInput(value);
+    setShowDropdown(true);
+    const search = value.toLowerCase();
+    setFilteredCompanies(
+      search
+        ? allCompanies.filter((c) => c.toLowerCase().includes(search))
+        : allCompanies,
+    );
+  }
+
+  function handleCompanySelect(selected) {
+    setCompanyInput(selected);
+    setShowDropdown(false);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (selected) next.set('company', selected);
+      else next.delete('company');
+      return next;
+    });
+  }
 
   const loadJobs = useCallback(
     async (pg = 1) => {
@@ -71,12 +116,56 @@ export default function FindJobsPage() {
     <main>
       <div className="border-b bg-white">
         <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-          <h1 className="text-2xl font-bold text-ink sm:text-3xl">Find Jobs</h1>
-          <p className="mt-1 text-sm text-ink-secondary">
-            {keyword || location || company
-              ? `Results for ${[company, keyword, location].filter(Boolean).join(' · ')}`
-              : 'Browse all available positions'}
-          </p>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-ink sm:text-3xl">Find Jobs</h1>
+              <p className="mt-1 text-sm text-ink-secondary">
+                {keyword || location || company
+                  ? `Results for ${[company, keyword, location].filter(Boolean).join(' · ')}`
+                  : 'Browse all available positions'}
+              </p>
+            </div>
+
+            <div className="relative w-full sm:w-64" ref={companyRef}>
+              <label className="sr-only" htmlFor="company-filter">Company</label>
+              <input
+                id="company-filter"
+                type="text"
+                value={companyInput}
+                onChange={(e) => handleCompanyInputChange(e.target.value)}
+                onFocus={() => { setShowDropdown(true); setFilteredCompanies(allCompanies); }}
+                placeholder="Search companies..."
+                className="w-full rounded-lg border bg-white px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-accent-500"
+              />
+              {companyInput && (
+                <button
+                  onClick={() => handleCompanySelect('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink"
+                >
+                  &times;
+                </button>
+              )}
+              {showDropdown && (
+                <div className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-lg border bg-white shadow-lg">
+                  {filteredCompanies.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-ink-muted">No companies found</div>
+                  ) : (
+                    filteredCompanies.map((c) => (
+                      <button
+                        key={c}
+                        onClick={() => handleCompanySelect(c)}
+                        className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-accent-50 ${
+                          c === company ? 'font-semibold text-accent-600' : 'text-ink'
+                        }`}
+                      >
+                        {c}
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
 
           {(keyword || location || company) && (
             <button

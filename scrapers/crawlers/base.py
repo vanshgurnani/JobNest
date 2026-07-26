@@ -167,6 +167,18 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
     if smart_match:
         return {"platform": "smartrecruiters", "token": next(group for group in smart_match.groups() if group)}
 
+    oraclecloud_match = re.search(
+        r'https?://([^./]+)\.fa\.([^/]+?)/hcmUI/CandidateExperience/en/sites/([^/?#\s"\']+)',
+        searchable,
+    )
+    if oraclecloud_match:
+        return {
+            "platform": "oraclecloud",
+            "subdomain": oraclecloud_match.group(1),
+            "domain": f"{oraclecloud_match.group(1)}.fa.{oraclecloud_match.group(2)}",
+            "site": oraclecloud_match.group(3),
+        }
+
     return None
 
 
@@ -368,6 +380,72 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling SmartRecruiters for %s: %s", company, e)
+
+    elif platform == "oraclecloud":
+        domain = ats_info["domain"]
+        site = ats_info["site"]
+        limit_per_page = min(limit or 20, 200)
+        oracle_headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        }
+        try:
+            expand = (
+                "requisitionList.workLocation,requisitionList.otherWorkLocations,"
+                "requisitionList.secondaryLocations,flexFieldsFacet.values,"
+                "requisitionList.requisitionFlexFields"
+            )
+            finder = f"findReqs;siteNumber={site},limit={limit_per_page},offset=0"
+            listings_url = (
+                f"https://{domain}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                f"?onlyData=true&expand={expand}&finder={finder}"
+            )
+            data = await request_json_with_retries(listings_url, headers=oracle_headers, timeout=30)
+            items = data.get("items") or []
+            if items:
+                search_item = items[0]
+                total = int(search_item.get("TotalJobsCount") or 0)
+                req_list = search_item.get("requisitionList") or []
+
+                need = min(page * limit * 5, total, 2000) if limit else min(total, 2000)
+                offsets = list(range(limit_per_page, total, limit_per_page))
+                for offset in offsets:
+                    await asyncio.sleep(0.5)
+                    pf = f"findReqs;siteNumber={site},limit={limit_per_page},offset={offset}"
+                    pu = f"https://{domain}/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&expand={expand}&finder={pf}"
+                    try:
+                        pd = await request_json_with_retries(pu, headers=oracle_headers, timeout=30)
+                        pi = pd.get("items") or []
+                        if pi:
+                            req_list.extend(pi[0].get("requisitionList") or [])
+                    except Exception:
+                        pass
+                    if len(req_list) >= need:
+                        break
+
+                for raw in req_list:
+                    job_id = str(raw.get("Id") or "")
+                    title = raw.get("Title") or ""
+                    loc = raw.get("PrimaryLocation") or ""
+                    posted = raw.get("PostedDate") or ""
+                    desc_short = raw.get("ShortDescriptionStr") or ""
+                    apply_url = f"https://{domain}/hcmUI/CandidateExperience/en/sites/{site}/job/{job_id}" if job_id else ""
+
+                    normalized = normalize_job_payload({
+                        "job_id": job_id,
+                        "title": title,
+                        "location": loc,
+                        "description": desc_short,
+                        "apply_url": apply_url,
+                        "posted_date": posted,
+                        "employment_type": "",
+                        "experience": "",
+                        "skills": [],
+                    }, company, "oraclecloud")
+                    if _matches_filter(normalized, keyword=keyword, location=location):
+                        jobs.append(normalized)
+        except Exception as e:
+            logger.error("Failed crawling Oracle Cloud for %s: %s", company, e)
 
     return _slice_page(jobs, page=page, limit=limit) if platform != "workday" else jobs
 

@@ -63,6 +63,7 @@ def detect_ats(url: str, html: str = "") -> str | None:
         ("workday", r"myworkdayjobs\.com"),
         ("smartrecruiters", r"smartrecruiters\.com"),
         ("ashby", r"ashbyhq\.com"),
+        ("oraclecloud", r"oraclecloud\.com/hcmUI/CandidateExperience"),
     ]
 
     for name, pattern in _ATS_PATTERNS:
@@ -491,35 +492,6 @@ def _company_name_from_url(url: str) -> str:
     return (labels[0].replace("-", " ")) if labels else "company"
 
 
-class _CompanyScraper:
-    def __init__(self, company: str) -> None:
-        self.company = company
-        self.logger = LOGGER
-
-    async def fetch_jobs(
-        self,
-        url: str | None = None,
-        keyword: str | None = None,
-        location: str | None = None,
-        page: int = 1,
-        limit: int = 20,
-    ) -> list[dict[str, Any]]:
-        from scrapers.crawlers.orchestrator import crawl_jobs
-
-        results = await crawl_jobs(
-            company=self.company,
-            keyword=keyword,
-            location=location,
-            page=page,
-            limit=limit,
-        )
-        jobs: list[dict[str, Any]] = []
-        for result in results:
-            if result.get("status") == "ok":
-                jobs.extend(result.get("jobs", []))
-        return jobs
-
-
 class _ATSScraper:
     def __init__(self, ats: str, company: str) -> None:
         self.ats = ats
@@ -553,14 +525,7 @@ class _ATSScraper:
 
 
 def route_scraper(url: str, html: str = "") -> GenericScraper | None:
-    from scrapers.crawlers.orchestrator import _REGISTRY
-
     company_name = _company_name_from_url(url)
-    company_key = company_name.lower()
-
-    if company_key in _REGISTRY:
-        LOGGER.info("[INFO] Using scraper: %s (company-specific)", company_name)
-        return _CompanyScraper(company_key)
 
     ats = detect_ats(url, html)
     if ats:
@@ -651,6 +616,26 @@ async def _scrape_company(
                     continue
                 seen_ids.add(job_id)
                 page_jobs.append(job)
+
+        if not page_jobs and generic_only and _scraper is not None and page == 1:
+            LOGGER.info("[SCRAPE] Generic scraper returned 0 jobs — retrying via ATS/universal crawler for '%s'", label)
+            _scraper = None
+            results = await crawl_jobs(
+                company=company,
+                company_url=company_url,
+                keyword=keyword,
+                location=location,
+                page=page,
+                limit=page_size,
+            )
+            for result in results:
+                for raw_job in result.get("jobs", []):
+                    job = canonicalize_job(raw_job)
+                    job_id = job.get("id") or f"{label}-{len(seen_ids)+1}"
+                    if job_id in seen_ids:
+                        continue
+                    seen_ids.add(job_id)
+                    page_jobs.append(job)
 
         LOGGER.info("[SCRAPE] Page complete target='%s' page=%d jobs_found=%d", label, page, len(page_jobs))
         if not page_jobs:

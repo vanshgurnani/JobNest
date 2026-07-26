@@ -3,9 +3,24 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from app.services.cache import build_cache_key, crawl_cache
-from app.services.job_store import find_job_by_id, find_jobs
+from app.services.job_store import find_companies, find_job_by_id, find_jobs
 
 router = APIRouter(prefix="", tags=["jobs"])
+
+SUPPORTED_COMPANIES = [
+    "amazon", "meta", "microsoft", "tca", "kpmg", "jpmorgan", "wipro",
+]
+
+
+@router.get("/companies")
+async def get_companies() -> dict:
+    try:
+        companies = await find_companies()
+        if not companies:
+            companies = [c.title() for c in SUPPORTED_COMPANIES]
+    except RuntimeError:
+        companies = [c.title() for c in SUPPORTED_COMPANIES]
+    return {"companies": companies}
 
 
 async def _cache_response(key: str, payload: dict) -> dict:

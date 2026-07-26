@@ -9,8 +9,8 @@ Job hunting today means checking 20+ career sites, each with different UX, filte
 - **Unified schema** — every job, from any company or ATS, stored in a consistent format
 - **ATS-aware scraping** — automatically detects and adapts to Lever, Greenhouse, Workday, Ashby, SmartRecruiters, and custom career portals
 - **Dynamic generic scraper** — cascading extraction pipeline (JSON-LD → embedded JSON → anchor analysis → BS4 heuristic) for any company without a dedicated crawler
-- **Intelligent routing** — automatically selects company-specific → ATS → generic fallback per URL
-- **Company-specific crawlers** — optimized scrapers for Amazon, Microsoft, and Meta that use their internal APIs
+- **Intelligent routing** — automatically selects ATS → generic fallback per URL
+- **Single universal crawler** — handles all companies via ATS detection and dynamic extraction
 - **Intelligent parsing** — extracts role, skills, and experience level from raw titles and descriptions
 - **Dual mode** — preview scraped jobs locally or persist to MongoDB
 - **Clean frontend** — search, filter, save, and explore jobs with a fast, responsive UI
@@ -29,8 +29,7 @@ Job hunting today means checking 20+ career sites, each with different UX, filte
 
 ### Scraping Engine (Async Python)
 
-- **3 company-specific crawlers**: Amazon (Jobs API), Microsoft (PCSX API + skills), Meta (GraphQL + HTML fallback)
-- **Universal ATS-aware crawler**: detects and scrapes Lever, Greenhouse, Workday, Ashby, SmartRecruiters
+- **Universal ATS-aware crawler**: detects and scrapes Lever, Greenhouse, Workday, Ashby, SmartRecruiters + any company via dynamic extraction
 - **Multi-strategy extraction**: JSON-LD, embedded JSON, HTML anchor analysis, secondary API enrichment
 - **Auto-retry** with exponential backoff (3 retries)
 - **Deduplication** by (company + job_id/url/title+location)
@@ -79,16 +78,10 @@ python run.py
 ### Scrape Jobs (Preview — no DB required)
 
 ```bash
-python scrapers/scrape_jobs.py --mode local --companies amazon,microsoft --pages 1
-```
-
-### Scrape Jobs by URL (Bypass Company Name Lookup)
-
-```bash
 python scrapers/scrape_jobs.py --mode local --company-url "https://careers.google.com"
 ```
 
-### Scrape with Generic-Only Mode (Skip Registered Crawlers)
+### Scrape with Generic-Only Mode (Skip ATS Routing)
 
 ```bash
 python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https://jobs.apple.com/en-in/search"
@@ -97,7 +90,7 @@ python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https:
 ### Scrape Jobs (Store to MongoDB)
 
 ```bash
-python scrapers/scrape_jobs.py --mode db --companies all --pages 2
+python scrapers/scrape_jobs.py --mode db --company-url "https://careers.google.com,https://jobs.apple.com" --pages 2
 ```
 
 ### Frontend
@@ -153,11 +146,8 @@ docker compose --profile tools run scraper
 │  scrapers/                                             │
 │  ├── scrape_jobs.py     CLI entry point (argparse)     │
 │  └── crawlers/                                         │
-│      ├── orchestrator.py  Company → crawler dispatch   │
+│      ├── orchestrator.py  Universal crawler dispatcher │
 │      ├── base.py          HTTP retry, ATS detection    │
-│      ├── amazon.py        Amazon Jobs API              │
-│      ├── microsoft.py     Microsoft PCSX API + skills  │
-│      ├── meta.py          Meta GraphQL + HTML          │
 │      └── universal.py     Universal ATS-aware crawler  │
 └────────────────────────────────────────────────────────┘
 ```
@@ -173,17 +163,10 @@ docker compose --profile tools run scraper
 
 ## Supported Companies
 
-| Company | Crawler Strategy |
-|---------|-----------------|
-| Amazon | Custom API crawler (`amazon.py`) |
-| Microsoft | Custom API crawler with skills (`microsoft.py`) |
-| Meta | GraphQL + HTML fallback (`meta.py`) |
-| Lever shops | Universal ATS detection + API |
-| Greenhouse shops | Universal ATS detection + API |
-| Workday shops | Universal ATS detection + HTML parsing |
-| Ashby shops | Universal ATS detection + API |
-| SmartRecruiters | Universal ATS detection + API |
-| Any other career portal | Dynamic generic scraper (JSON-LD → embedded JSON → anchor links → BS4 heuristic) |
+| Company | Strategy |
+|---------|----------|
+| Any career portal | Universal ATS detection → dynamic extraction (JSON-LD → embedded JSON → anchor links → BS4 heuristic) |
+| Lever / Greenhouse / Workday / Ashby / SmartRecruiters | ATS detection → platform-specific API calls |
 
 ## Project Structure
 
@@ -194,7 +177,7 @@ docker compose --profile tools run scraper
 │   ├── schemas/             Pydantic models
 │   └── services/            Business logic (cache, store, parser)
 ├── scrapers/                Async scraping engine
-│   └── crawlers/            Company-specific + universal crawlers
+│   └── crawlers/            Universal crawler + base utilities
 ├── job-portal/              React + Vite frontend
 ├── scripts/                 Helper scripts
 ├── tests/                   Pytest unit tests (16 tests)
