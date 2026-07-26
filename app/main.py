@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.jobs import router as jobs_router
@@ -38,8 +38,10 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
+@app.route("/health", methods=["GET", "HEAD"])
+async def health(request: Request) -> dict[str, str] | Response:
+    if request.method == "HEAD":
+        return Response(status_code=200)
     status = {"status": "running", "mongodb": "unavailable"}
     try:
         status.update(await ping_mongo())
