@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from pymongo import ASCENDING, DESCENDING
+
+from app.config import get_settings
+from app.db.mongo import get_db
+from app.schemas.job import canonicalize_job
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _serialize_job(job: dict[str, Any]) -> dict[str, Any]:
+    serialized = dict(job)
+    serialized.pop("_id", None)
+    crawled_at = serialized.get("crawled_at")
+    if isinstance(crawled_at, datetime):
+        serialized["crawled_at"] = crawled_at.isoformat()
+    return serialized
+
+
+def _build_filter(
+    *,
+    company: str | None = None,
+    keyword: str | None = None,
+    location: str | None = None,
+    fresh_only: bool = False,
+) -> dict[str, Any]:
+    query: dict[str, Any] = {}
+    if company:
+        query["company"] = {"$regex": f"^{re.escape(company.strip())}$", "$options": "i"}
+    if keyword:
+        escaped = re.escape(keyword.strip())
+        query["$or"] = [
+            {"title": {"$regex": escaped, "$options": "i"}},
+            {"description": {"$regex": escaped, "$options": "i"}},
+            {"skills": {"$regex": escaped, "$options": "i"}},
+        ]
+    if location:
+        query["location"] = {"$regex": re.escape(location.strip()), "$options": "i"}
+    if fresh_only:
+        ttl = get_settings().cache_ttl_seconds
+        query["crawled_at"] = {"$gte": _now() - timedelta(seconds=ttl)}
+    return query
+
+
+async def upsert_jobs(jobs: list[dict[str, Any]]) -> None:
+    if not jobs:
+        return
+
+    db = get_db()
+    crawled_at = _now()
+    for raw_job in jobs:
+        job = canonicalize_job(raw_job)
+        if not job.get("id"):
+            continue
+        job["crawled_at"] = crawled_at
+        await db.jobs.update_one(
+            {"id": job["id"]},
+            {"$set": job, "$setOnInsert": {"first_seen_at": crawled_at}},
+            upsert=True,
+        )
+
+
+async def find_jobs(
+    *,
+    company: str | None = None,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+    fresh_only: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
+    db = get_db()
+    query = _build_filter(company=company, keyword=keyword, location=location, fresh_only=fresh_only)
+    skip = max(page - 1, 0) * limit
+    total = await db.jobs.count_documents(query)
+    cursor = (
+        db.jobs.find(query)
+        .sort([("posted_date", DESCENDING), ("crawled_at", DESCENDING), ("title", ASCENDING)])
+        .skip(skip)
+        .limit(limit)
+    )
+    jobs = [_serialize_job(job) async for job in cursor]
+    return jobs, total
+
+
+async def find_job_by_id(job_id: str) -> dict[str, Any] | None:
+    db = get_db()
+    job = await db.jobs.find_one({"$or": [{"id": job_id}, {"job_id": job_id}]})
+    return _serialize_job(job) if job else None

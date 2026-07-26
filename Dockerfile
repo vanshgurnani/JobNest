@@ -8,9 +8,6 @@ RUN pip install --upgrade pip
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browser dependencies
-RUN playwright install --with-deps chromium
-
 COPY . .
 
 EXPOSE 10000

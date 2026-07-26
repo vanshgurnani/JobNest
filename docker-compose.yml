@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # MongoDB Database Container
+  mongodb:
+    image: mongo:7.0
+    container_name: job_mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=job_intelligence
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # FastAPI Web Backend Application
+  web:
+    build: .
+    container_name: job_api
+    restart: always
+    ports:
+      - "10000:10000"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/job_intelligence
+      - MONGO_DB_NAME=job_intelligence
+      - CORS_ORIGINS=["*"]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  # Scraper Runner Container (Runs scraper in DB mode)
+  scraper:
+    build: .
+    container_name: job_scraper
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/job_intelligence
+      - MONGO_DB_NAME=job_intelligence
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    command: python scrapers/scrape_jobs.py --mode db --companies all --pages 2
+    profiles:
+      - tools
+
+volumes:
+  mongo_data:
+    driver: local

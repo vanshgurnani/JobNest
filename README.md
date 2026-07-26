@@ -1,284 +1,247 @@
-# AI Job Intelligence Crawler
+# Job Nest — AI Job Intelligence Platform
 
-A lightweight **FastAPI** backend that fetches real-time job data for **Amazon, Microsoft, and Meta** using their available public/undocumented endpoints and returns **normalized job payloads**.
+**Job Nest** is an intelligent job aggregation platform that scrapes, normalizes, and serves job listings from hundreds of companies through a unified, searchable API and a modern React frontend. Built to solve the problem of fragmented job hunting — where opportunities are scattered across hundreds of company career portals, each with its own format, ATS, and search interface.
 
-- **No database** (fresh crawl on each request)
-- **Concurrent crawling** (one crawler failure does not break the others)
-- **Python 3.11** + async HTTP (`httpx`)
+## Why Job Nest?
 
-> Note: Crawling strategies rely on endpoints discovered/observed via network inspection and may change.
+Job hunting today means checking 20+ career sites, each with different UX, filters, and update cycles. Job Nest consolidates everything into one place:
 
----
+- **Unified schema** — every job, from any company or ATS, stored in a consistent format
+- **ATS-aware scraping** — automatically detects and adapts to Lever, Greenhouse, Workday, Ashby, SmartRecruiters, and custom career portals
+- **Dynamic generic scraper** — cascading extraction pipeline (JSON-LD → embedded JSON → anchor analysis → BS4 heuristic) for any company without a dedicated crawler
+- **Intelligent routing** — automatically selects company-specific → ATS → generic fallback per URL
+- **Company-specific crawlers** — optimized scrapers for Amazon, Microsoft, and Meta that use their internal APIs
+- **Intelligent parsing** — extracts role, skills, and experience level from raw titles and descriptions
+- **Dual mode** — preview scraped jobs locally or persist to MongoDB
+- **Clean frontend** — search, filter, save, and explore jobs with a fast, responsive UI
 
-## Features
+## What's Built
 
-- `GET /jobs` returns aggregated job results across supported companies
-- `GET /jobs/{company}` returns results for a single company; unsupported companies use the universal fallback crawler
-- Concurrent orchestrator with per-company error isolation
-- Normalization into a common schema:
-  - company, job_id, title, location, description, skills, employment_type, experience, apply_url, source
-- Enrichment step:
-  - `app/services/ai_parser.py` backfills `skills` and `experience` from the job title when missing
+### Backend (FastAPI / Python)
 
----
+- **REST API** — `GET /jobs`, `GET /jobs/{company}`, `GET /job/{job_id}`, `GET /health`
+- **Async MongoDB** — Motor driver with automatic indexing on startup
+- **In-memory cache** — TTL (15 min) + LRU eviction (512 entries), async-safe
+- **CORS middleware** — configurable origins for dev and production
+- **Graceful degradation** — API remains available (serving cache) when MongoDB is down
+- **Job canonicalization** — stable SHA-256 based job IDs for deduplication
+- **Title parser** — regex-based extraction of role, skills, and experience level
+
+### Scraping Engine (Async Python)
+
+- **3 company-specific crawlers**: Amazon (Jobs API), Microsoft (PCSX API + skills), Meta (GraphQL + HTML fallback)
+- **Universal ATS-aware crawler**: detects and scrapes Lever, Greenhouse, Workday, Ashby, SmartRecruiters
+- **Multi-strategy extraction**: JSON-LD, embedded JSON, HTML anchor analysis, secondary API enrichment
+- **Auto-retry** with exponential backoff (3 retries)
+- **Deduplication** by (company + job_id/url/title+location)
+- **Expired job detection** via `valid_through` and keyword matching
+- **10+ known company career URLs**: Accenture, Cognizant, Google, Infosys, JPMorgan, Mastercard, TCS, Wipro, KPMG, Zoho
+- **CLI entry point** with argparse: `--companies`, `--keyword`, `--location`, `--pages`, `--mode`
+
+### Frontend (React / Tailwind)
+
+- **Responsive UI** with glassmorphic sticky header and dark theme
+- **Hero section** with keyword + location search form
+- **Popular companies** quick-filter (Google, Microsoft, Amazon, Meta, Apple, Netflix, Stripe, Shopify, GitHub)
+- **Paginated listings** (20 per page) with loading skeletons
+- **Sidebar filters**: Job Type, Experience Level, Salary Range
+- **Job detail page** with company icon, metadata, skills tags, save/bookmark, apply link
+- **LocalStorage-based bookmarks** — persisted across sessions
+- **Time-ago display** ("2h ago", "3d ago")
+- **Scroll-triggered animations** via Intersection Observer
+- **Client-side caching** with 10-minute TTL and race-condition-safe requests
+
+### Infrastructure
+
+- **Docker Compose** — 3 services: MongoDB, Web API, Scraper (optional profile)
+- **Dockerfile** — Python 3.11-slim, ASGI via Uvicorn
+- **MongoDB health checks** and named volume for data persistence
+- **Vite proxy** config for local frontend dev (port 5174 → 8000)
+- **Tests** — 16 unit tests covering ATS detection, JSON-LD parsing, deduplication, URL resolution, error handling
+
+### Authentication (Scaffolded — Not Yet Wired)
+
+- User schemas (`UserCreate`, `UserLogin`, `UserPublic`, `TokenResponse`) defined in Pydantic
+- JWT config (`HS256`, 7-day expiry) in settings
+- MongoDB indexes for `users`, `saved_jobs`, `search_history` collections
+- No auth middleware, routes, or password hashing implemented yet
+
+## Quick Start
+
+### Backend
+
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python run.py
+```
+
+### Scrape Jobs (Preview — no DB required)
+
+```bash
+python scrapers/scrape_jobs.py --mode local --companies amazon,microsoft --pages 1
+```
+
+### Scrape Jobs by URL (Bypass Company Name Lookup)
+
+```bash
+python scrapers/scrape_jobs.py --mode local --company-url "https://careers.google.com"
+```
+
+### Scrape with Generic-Only Mode (Skip Registered Crawlers)
+
+```bash
+python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https://jobs.apple.com/en-in/search"
+```
+
+### Scrape Jobs (Store to MongoDB)
+
+```bash
+python scrapers/scrape_jobs.py --mode db --companies all --pages 2
+```
+
+### Frontend
+
+```bash
+cd job-portal && npm install && npm run dev
+```
+
+### Docker (full stack)
+
+```bash
+docker compose up -d
+docker compose --profile tools run scraper
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Frontend (React + Vite)           │
+│  job-portal/src/                                     │
+│  ├── pages/       HomePage, FindJobsPage, JobDetail  │
+│  ├── components/  Navbar, JobCard, Filters, etc.     │
+│  ├── hooks/       useJobs (caching, loading state)   │
+│  └── services/    api.js (fetch wrapper)             │
+└──────────────┬──────────────────────────────────────┘
+               │  HTTP (proxy / Vite dev)
+               ▼
+┌──────────────────────────────────────────────────────┐
+│                   Backend (FastAPI / Python)          │
+│  app/                                                 │
+│  ├── main.py          App setup, CORS, lifespan       │
+│  ├── api/jobs.py      Route handlers + caching        │
+│  ├── services/                                         │
+│  │   ├── job_store.py  MongoDB queries                │
+│  │   ├── cache.py      TTL + LRU cache                │
+│  │   ├── ai_parser.py  Title → role/skills/exp        │
+│  │   └── normalizer.py Field mapping                  │
+│  ├── schemas/job.py    Pydantic models                │
+│  ├── schemas/user.py   Auth/saved/search schemas      │
+│  ├── db/mongo.py       Motor connection + indexes     │
+│  └── config.py         Settings (env vars)            │
+└──────────────┬───────────────────────────────────────┘
+               │  read/write
+               ▼
+┌───────────────────────────────────────────────────────┐
+│                    MongoDB (Motor async)               │
+│  Collections: jobs, users, saved_jobs, search_history  │
+└──────────────┬────────────────────────────────────────┘
+               │  upsert
+┌──────────────▼────────────────────────────────────────┐
+│                   Scraper Engine (Async Python)        │
+│  scrapers/                                             │
+│  ├── scrape_jobs.py     CLI entry point (argparse)     │
+│  └── crawlers/                                         │
+│      ├── orchestrator.py  Company → crawler dispatch   │
+│      ├── base.py          HTTP retry, ATS detection    │
+│      ├── amazon.py        Amazon Jobs API              │
+│      ├── microsoft.py     Microsoft PCSX API + skills  │
+│      ├── meta.py          Meta GraphQL + HTML          │
+│      └── universal.py     Universal ATS-aware crawler  │
+└────────────────────────────────────────────────────────┘
+```
+
+## API Endpoints
+
+| Method | Endpoint | Description | Params |
+|--------|----------|-------------|--------|
+| GET | `/health` | Health check (includes MongoDB status) | — |
+| GET | `/jobs` | Paginated job listings | `company`, `keyword`, `location`, `page`, `limit` |
+| GET | `/jobs/{company}` | Jobs filtered by company | `keyword`, `location`, `page`, `limit` |
+| GET | `/job/{job_id}` | Single job detail | — |
+
+## Supported Companies
+
+| Company | Crawler Strategy |
+|---------|-----------------|
+| Amazon | Custom API crawler (`amazon.py`) |
+| Microsoft | Custom API crawler with skills (`microsoft.py`) |
+| Meta | GraphQL + HTML fallback (`meta.py`) |
+| Lever shops | Universal ATS detection + API |
+| Greenhouse shops | Universal ATS detection + API |
+| Workday shops | Universal ATS detection + HTML parsing |
+| Ashby shops | Universal ATS detection + API |
+| SmartRecruiters | Universal ATS detection + API |
+| Any other career portal | Dynamic generic scraper (JSON-LD → embedded JSON → anchor links → BS4 heuristic) |
 
 ## Project Structure
 
-```text
-app/
-  api/
-    jobs.py                 # API routes (/health, /jobs, /jobs/{company})
-  crawler/
-    orchestrator.py         # Runs crawlers concurrently + enrichment
-    base.py                # Shared helpers: HTTP retries, normalization, HTML parsing, ATS utilities
-    amazon.py              # Amazon jobs via search.json API
-    microsoft.py           # Microsoft jobs via PCSX JSON endpoints
-    meta.py                # Meta jobs via GraphQL + per-job detail parsing
-  services/
-    ai_parser.py           # Heuristic parsing from job title (skills/experience)
-    normalizer.py          # Additional normalization utility
-  schemas/
-    job.py                 # Pydantic Job model
-main.py                     # FastAPI app wiring
-run.py                       # Uvicorn entrypoint
-Dockerfile                   # Container build
-tests/
-  test_crawlers.py           # Unit test for HTML anchor job link extraction
-requirements.txt
+```
+├── app/                     FastAPI backend
+│   ├── api/                 Route handlers
+│   ├── db/                  MongoDB connection
+│   ├── schemas/             Pydantic models
+│   └── services/            Business logic (cache, store, parser)
+├── scrapers/                Async scraping engine
+│   └── crawlers/            Company-specific + universal crawlers
+├── job-portal/              React + Vite frontend
+├── scripts/                 Helper scripts
+├── tests/                   Pytest unit tests (16 tests)
+├── docs/                    Documentation (ARCHITECTURE, API, SETUP, etc.)
+├── docker-compose.yml       3-service orchestration
+├── Dockerfile               Backend container
+└── requirements.txt         Python dependencies
 ```
 
----
+## Stack
 
-## API
+### Backend
+- **Python 3.11** / **FastAPI 0.115** — async web framework
+- **MongoDB 7** / **Motor 3.6** — async database driver
+- **HTTPX 0.28** — async HTTP client
+- **BeautifulSoup4 + lxml** — HTML parsing
+- **Pydantic 2.10** — data validation
 
-### `GET /health`
-Health check endpoint.
+### Frontend
+- **React 18** — UI framework
+- **React Router 6** — client-side routing
+- **Tailwind CSS 3.4** — utility-first styling
+- **Vite 5** — build tool and dev server
 
-**Response**
-```json
-{ "status": "running" }
-```
+### Infrastructure
+- **Docker** / **Docker Compose** — containerization
+- **Pytest** — unit testing
 
-### `GET /jobs`
-Aggregates jobs across all supported companies.
+## Documentation
 
-**Query params (optional):**
-- `company`: if provided, crawls only that company (e.g. `amazon`)
-- `company_url`: optional official company careers/base URL for unsupported companies
-- `keyword`: overrides default query keyword used by that company crawler
-- `location`: overrides default location used by that company crawler
-- `page`: 1-indexed pagination page (default: `1`)
-- `limit`: number of jobs to return for the page (default: `20`, max: `100`)
+| Document | Description |
+|---|---|
+| [Architecture](docs/ARCHITECTURE.md) | System design and codebase walkthrough |
+| [API Reference](docs/API.md) | REST endpoints, schemas, examples |
+| [Scraper Guide](docs/SCRAPER_GUIDE.md) | CLI usage and crawler internals |
+| [Setup Guide](docs/SETUP.md) | Local development setup |
+| [Docker Deployment](docs/DOCKER_DEPLOYMENT.md) | Containerized deployment |
 
+## What's Next (Scaffolded but Not Yet Implemented)
 
-**Response format**
-```json
-{
-  "total": 123,
-  "latest_jobs": [ ... ],
-  "jobs": [ ... ]
-}
-```
+- **User authentication** — register/login with JWT (schemas, indexes, and config exist)
+- **Saved jobs** — persisted bookmarks per user
+- **Search history** — per-user search tracking
+- **Rate limiting** — config-based (settings exist, middleware not wired)
+- **Frontend serving** — FastAPI serving `job-portal/dist/` in production
+- **Frontend tests** — no test runner configured for the React app
 
-### `GET /jobs/{company}`
-Crawls a single company.
+## License
 
-**Path params**
-- `company`: any company name. `amazon`, `microsoft`, and `meta` use dedicated crawlers; others use the universal fallback.
-
-**Query params (optional):**
-- `company_url`: optional official company careers/base URL for unsupported companies
-- `keyword`, `location`
-- `page`: 1-indexed pagination page (default: `1`)
-- `limit`: number of jobs to return for the page (default: `20`, max: `100`)
-
-
-**Response format**
-```json
-{
-  "company": "Amazon",
-  "jobs": [ ... ]
-}
-```
-
----
-
-## Crawling Logic (High Level)
-
-### Orchestrator: `app/crawler/orchestrator.py`
-- Maintains a registry:
-  - `amazon` → `fetch_amazon_jobs`
-  - `microsoft` → `fetch_microsoft_jobs`
-  - `meta` → `fetch_meta_jobs`
-- If `company` is provided:
-  - runs only that crawler
-- If `company` is not in the registry:
-  - resolves an official careers page or uses `company_url`
-  - detects Greenhouse, Lever, Workday, SmartRecruiters, and Ashby
-  - falls back through JSON APIs, embedded JSON, HTML job links, and JSON-LD JobPosting data
-- Otherwise:
-  - runs all crawlers concurrently via `asyncio.gather`
-  - failures are isolated per company using `_safe_crawl()`
-- After crawling, `_enrich_jobs()` backfills `skills` and `experience` from the job title when missing.
-
-### Shared utilities: `app/crawler/base.py`
-Key responsibilities:
-- `request_with_retries()` / `request_json_with_retries()`
-  - async HTTP with retries + exponential backoff
-- `normalize_job_payload()`
-  - maps raw fields from each crawler into a common schema
-- `extract_jobs_from_html()`
-  - scans HTML for candidate `<a href=...>` links that look like job links
-  - validated by `tests/test_crawlers.py`
-- ATS utilities (`detect_ats()`, `crawl_ats_jobs()`)
-  - support for known ATS platforms via public APIs (present in shared code)
-
----
-
-## Company Implementations
-
-### Amazon: `app/crawler/amazon.py`
-- Uses Amazon’s `search.json` endpoint.
-- Paginates with `page=1..max_pages`.
-- Builds a detailed description from description + basic/preferred qualifications.
-- Normalizes each job via `normalize_job_payload(...)`.
-
-### Microsoft: `app/crawler/microsoft.py`
-- Uses internal JSON endpoints discovered via Playwright inspection:
-  - search endpoint returns positions
-  - details endpoint returns full description
-  - insights endpoint returns skills
-- Fetches details concurrently in small batches (size 5) to reduce throttling.
-- Normalizes into common schema.
-
-### Meta: `app/crawler/meta.py`
-- Step 1: Open `https://www.metacareers.com/jobsearch/` in Playwright.
-- Step 2: Intercept **GraphQL** network responses and collect job nodes from known response paths.
-  - Client-side de-duplication is done using `seen_ids`.
-- Step 3: Scroll until enough GraphQL results are collected for the requested `page`/`limit`.
-  - Pagination is applied by slicing the collected GraphQL results:
-    `start=(page-1)*limit`, `raw_jobs[start:start+limit]`.
-- Step 4: Normalize each selected job into the common schema via `normalize_job_payload(...)`.
-
-Notes:
-- `keyword` / `location` filtering is applied client-side in the crawler after GraphQL capture (since intercepted payloads can vary by locale/experiments).
-
-
----
-
-## Data Model
-
-`app/schemas/job.py` defines a Pydantic model:
-
-- `id: str`
-- `company: str`
-- `title: str`
-- `location: str`
-- `description: str`
-- `employment_type: str`
-- `experience: str`
-- `skills: list[str]`
-- `url: str`
-- `source: str`
-
-Crawlers currently return plain dicts, but normalization/enrichment is designed to match these concepts.
-
----
-
-## Testing
-
-`tests/test_crawlers.py`
-- Validates `extract_jobs_from_html()` prioritization of anchors that look like job links
-- Ensures `location_hint` propagation
-
-Run tests:
-```bash
-pytest -q
-```
-
----
-
-## Backend Flow (End-to-End)
-
-1. **HTTP request** hits one of the routes in `app/api/jobs.py`:
-   - `GET /health`
-   - `GET /jobs`
-   - `GET /jobs/{company}`
-2. The route calls `crawl_jobs(...)` from `app/crawler/orchestrator.py`, forwarding:
-   - `company`, `company_url`
-   - `keyword`, `location`
-   - `page`, `limit`
-3. The **orchestrator** decides which crawler(s) to run:
-   - If `company_url` is provided but `company` is not, it infers a company name from the URL and uses the universal crawler.
-   - If `company` is one of the dedicated crawlers (`amazon`, `microsoft`, `meta`), it runs that crawler.
-   - If `company` is unknown, it uses the universal fallback/ATS-based approach.
-   - When `company` is not provided, it runs supported crawlers **concurrently** via `asyncio.gather`.
-   - Each company crawl is wrapped by `_safe_crawl()` so failures are isolated per company.
-4. Each company crawler fetches raw job data and returns **normalized** job dicts using shared helpers in `app/crawler/base.py`.
-5. After crawling, the orchestrator enriches the normalized jobs:
-   - `_enrich_jobs()` uses `app/services/ai_parser.py` to backfill `skills` / `experience` from the job title when missing.
-6. Pagination semantics:
-   - The API passes `page` and `limit` into each crawler.
-   - Crawler implementations apply pagination when possible; for Meta, the Playwright-collect-then-slice approach is used (`start=(page-1)*limit`, `raw_jobs[start:start+limit]`).
-7. The API returns:
-   - aggregated results for `GET /jobs` (`total`, `latest_jobs`, `jobs`, plus `page`/`limit`)
-   - a single company’s result set for `GET /jobs/{company}` (`company`, `total`, `jobs`, plus `page`/`limit`).
-
-
----
-
-## Local Setup / Run
-
-
-```bash
-cd /Users/vansh-gurnani/Desktop/job
-python3 -m pip install -r requirements.txt
-python3 run.py
-```
-
-Open:
-- http://localhost:8000/health
-- http://localhost:8000/jobs
-- http://localhost:8000/jobs/amazon
-
-Run tests:
-```bash
-PYTHONPATH=. pytest -q
-```
-
-
----
-
-## Docker
-
-Build and run:
-```bash
-docker build -t job-crawler .
-docker run -p 8000:8000 job-crawler
-```
-
-Then open:
-- http://localhost:8000/health
-- http://localhost:8000/jobs
-
----
-
-## Notes / Caveats
-
-- Crawling relies on endpoints that may change without notice.
-- No persistence is used; each request triggers a fresh crawl.
-- Network failures are handled with retries and per-company failure isolation.
-- `ai_parser` is heuristic (keyword-based), not an actual ML model.
-
----
-
-## Main Files (Quick Reference)
-
-- `run.py` – runs Uvicorn
-- `app/main.py` – FastAPI app initialization
-- `app/api/jobs.py` – routes
-- `app/crawler/orchestrator.py` – concurrency + enrichment
-- `app/crawler/amazon.py`, `app/crawler/microsoft.py`, `app/crawler/meta.py` – crawlers
-- `app/crawler/base.py` – HTTP helpers + normalization
-- `app/services/ai_parser.py` – heuristic parsing
-- `tests/test_crawlers.py` – unit test
+MIT
