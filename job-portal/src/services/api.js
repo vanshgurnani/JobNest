@@ -47,3 +47,8 @@ export async function fetchJobById(id) {
 export async function fetchHealth() {
   return request('/health');
 }
+
+export async function fetchCompanies() {
+  const data = await request('/companies');
+  return data.companies || [];
+}

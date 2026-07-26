@@ -90,6 +90,16 @@ async def find_jobs(
     return jobs, total
 
 
+async def find_companies() -> list[str]:
+    db = get_db()
+    pipeline = [
+        {"$group": {"_id": "$company"}},
+        {"$sort": {"_id": 1}},
+    ]
+    cursor = db.jobs.aggregate(pipeline)
+    return [doc["_id"] async for doc in cursor if doc["_id"]]
+
+
 async def find_job_by_id(job_id: str) -> dict[str, Any] | None:
     db = get_db()
     job = await db.jobs.find_one({"$or": [{"id": job_id}, {"job_id": job_id}]})

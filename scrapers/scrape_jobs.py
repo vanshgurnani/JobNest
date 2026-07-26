@@ -63,6 +63,7 @@ def detect_ats(url: str, html: str = "") -> str | None:
         ("workday", r"myworkdayjobs\.com"),
         ("smartrecruiters", r"smartrecruiters\.com"),
         ("ashby", r"ashbyhq\.com"),
+        ("oraclecloud", r"oraclecloud\.com/hcmUI/CandidateExperience"),
     ]
 
     for name, pattern in _ATS_PATTERNS:
@@ -615,6 +616,26 @@ async def _scrape_company(
                     continue
                 seen_ids.add(job_id)
                 page_jobs.append(job)
+
+        if not page_jobs and generic_only and _scraper is not None and page == 1:
+            LOGGER.info("[SCRAPE] Generic scraper returned 0 jobs — retrying via ATS/universal crawler for '%s'", label)
+            _scraper = None
+            results = await crawl_jobs(
+                company=company,
+                company_url=company_url,
+                keyword=keyword,
+                location=location,
+                page=page,
+                limit=page_size,
+            )
+            for result in results:
+                for raw_job in result.get("jobs", []):
+                    job = canonicalize_job(raw_job)
+                    job_id = job.get("id") or f"{label}-{len(seen_ids)+1}"
+                    if job_id in seen_ids:
+                        continue
+                    seen_ids.add(job_id)
+                    page_jobs.append(job)
 
         LOGGER.info("[SCRAPE] Page complete target='%s' page=%d jobs_found=%d", label, page, len(page_jobs))
         if not page_jobs:
