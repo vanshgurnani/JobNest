@@ -43,49 +43,22 @@ export default function HomePage() {
   const [location, setLocation] = useState('');
   const [company, setCompany] = useState('');
   const [companies, setCompanies] = useState([]);
-  const [showCompanyDropdown, setShowCompanyDropdown] = useState(false);
-  const [companyFilter, setCompanyFilter] = useState('');
-  const companyRef = useRef(null);
 
   useEffect(() => {
     fetchCompanies().then(setCompanies).catch(() => {});
   }, []);
-
-  useEffect(() => {
-    function handleClickOutside(e) {
-      if (companyRef.current && !companyRef.current.contains(e.target)) {
-        setShowCompanyDropdown(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  useEffect(() => {
-    window.scrollTo(0, 0);
-  }, []);
-
-  const filteredCompanies = companyFilter
-    ? companies.filter((c) => c.toLowerCase().includes(companyFilter.toLowerCase()))
-    : companies;
 
   function handleSearch(e) {
     e.preventDefault();
     const params = new URLSearchParams();
     if (keyword.trim()) params.set('keyword', keyword.trim());
     if (location.trim()) params.set('location', location.trim());
-    if (company) params.set('company', company);
+    if (company.trim()) params.set('company', company.trim());
     navigate(`/jobs${params.toString() ? `?${params.toString()}` : ''}`);
   }
 
   function handleCompanyClick(name) {
     navigate(`/jobs?company=${encodeURIComponent(name)}`);
-  }
-
-  function selectCompany(name) {
-    setCompany(name);
-    setCompanyFilter(name);
-    setShowCompanyDropdown(false);
   }
 
   return (
@@ -147,39 +120,18 @@ export default function HomePage() {
                   className="w-full rounded-lg border-0 bg-transparent px-4 py-3 text-sm text-ink placeholder:text-ink-muted focus:outline-none sm:rounded-none"
                 />
               </div>
-              <div className="relative flex-1" ref={companyRef}>
+              <div className="flex-1">
                 <label className="sr-only" htmlFor="hero-company">
                   Company
                 </label>
                 <input
                   id="hero-company"
                   type="text"
-                  value={companyFilter}
-                  onChange={(e) => { setCompanyFilter(e.target.value); setShowCompanyDropdown(true); }}
-                  onFocus={() => setShowCompanyDropdown(true)}
+                  value={company}
+                  onChange={(e) => setCompany(e.target.value)}
                   placeholder="Company"
                   className="w-full rounded-lg border-0 bg-transparent px-4 py-3 text-sm text-ink placeholder:text-ink-muted focus:outline-none"
                 />
-                {showCompanyDropdown && (
-                  <div className="absolute z-10 mt-0 w-full rounded-lg border bg-white shadow-lg">
-                    {filteredCompanies.length === 0 ? (
-                      <div className="px-3 py-2 text-sm text-ink-muted">No companies found</div>
-                    ) : (
-                      filteredCompanies.map((c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          onClick={() => selectCompany(c)}
-                          className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-accent-50 ${
-                            c === company ? 'font-semibold text-accent-600' : 'text-ink'
-                          }`}
-                        >
-                          {c}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                )}
               </div>
               <div className="p-1 sm:flex-shrink-0">
                 <button type="submit" className="btn-primary w-full sm:w-auto">
