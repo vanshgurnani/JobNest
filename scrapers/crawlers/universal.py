@@ -8,6 +8,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup
 
 from scrapers.crawlers.base import (
@@ -90,7 +91,7 @@ _KNOWN_COMPANY_CAREERS_URLS = {
     "tcs": "https://www.tcs.com/careers",
     "tca": "https://www.tcs.com/careers",
 
-    "wipro": "https://careers.wipro.com/careers-home/jobs",
+    "wipro": "https://careers.wipro.com/viewalljobs/?locale=en_US",
 
     "kpmg": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
     "kpmg jp": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
@@ -1073,6 +1074,93 @@ async def _crawl_amazon_jobs(
     return jobs[start:start + limit]
 
 
+WIPRO_JOBS_API = "https://careers.wipro.com/services/recruiting/v1/jobs"
+
+
+async def _crawl_wipro_jobs(
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    ua = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    )
+
+    all_jobs: list[dict[str, Any]] = []
+
+    async with httpx.AsyncClient(headers={"User-Agent": ua}, follow_redirects=True, timeout=15) as c:
+        # Get session cookie
+        await c.get("https://careers.wipro.com/viewalljobs/?locale=en_US")
+
+        api_headers = {
+            "User-Agent": ua,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": "; ".join(f"{k}={v}" for k, v in c.cookies.items()),
+        }
+
+        target_page_count = max(page + 2, (limit // 10) + 2)
+
+        for page_num in range(target_page_count):
+            payload = {
+                "locale": "en_US",
+                "pageNumber": page_num,
+                "keywords": keyword or "",
+                "location": location or "",
+                "facetFilters": {},
+            }
+
+            try:
+                r = await c.post(WIPRO_JOBS_API, json=payload, headers=api_headers)
+                r.raise_for_status()
+                data = r.json()
+            except Exception as exc:
+                logger.warning("Wipro API page %d failed: %s", page_num, exc)
+                break
+
+            results = data.get("jobSearchResult", [])
+            for item in results:
+                j = item.get("response", {})
+                job_id = (j.get("id") or "").strip()
+                title = (j.get("unifiedStandardTitle") or j.get("urlTitle") or "").strip()
+                if not title or not job_id:
+                    continue
+
+                url_title = j.get("unifiedUrlTitle") or j.get("urlTitle") or title.lower().replace(" ", "-")
+                city = (j.get("sfstd_jobLocation_obj") or [""])[0]
+                state = (j.get("jobLocationState") or [""])[0]
+                country = (j.get("jobLocationCountry") or [""])[0]
+                location_parts = [p for p in (city, state, country) if p]
+                location_str = ", ".join(location_parts) if location_parts else ""
+
+                posted = (j.get("unifiedStandardStart") or "").strip()
+                valid_through = (j.get("unifiedStandardEnd") or "").strip()
+                apply_url = f"https://careers.wipro.com/{job_id}/{url_title}/job"
+
+                all_jobs.append({
+                    "title": title,
+                    "company": "Wipro",
+                    "location": location_str,
+                    "description": "",
+                    "url": apply_url,
+                    "apply_url": apply_url,
+                    "job_id": job_id,
+                    "posted_date": posted,
+                    "valid_through": valid_through,
+                    "skills": [],
+                    "source": "wipro-api",
+                })
+
+            if len(results) < 10:
+                break
+
+    start = max(page - 1, 0) * limit
+    return all_jobs[start:start + limit]
+
+
 async def universal_crawl_jobs(
     *,
     company_name: str,
@@ -1106,6 +1194,16 @@ async def universal_crawl_jobs(
     if is_amazon and _looks_like_json_api_url(careers_url):
         jobs = await _crawl_amazon_jobs(
             careers_url,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+        )
+        return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))
+
+    is_wipro = "wipro" in _host(careers_url) or company_name.strip().lower() == "wipro"
+    if is_wipro:
+        jobs = await _crawl_wipro_jobs(
             keyword=keyword,
             location=location,
             page=page,
