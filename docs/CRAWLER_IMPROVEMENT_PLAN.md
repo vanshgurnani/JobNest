@@ -226,25 +226,165 @@ FAILURE_TYPES = {
 - Randomly inject failures (timeouts, 403s, malformed HTML)
 - Verify fallback chains work correctly
 
+### Phase 8: Security Hardening
+
+#### 8.1 Rotate & Remove Hardcoded Credentials
+
+- Immediately rotate the MongoDB password (`iz64rqtBBQss8iQ7`)
+- Remove `.env` from git history (`git filter-branch` / `git filter-repo`)
+- Add `.env` to `.gitignore` (verify it's already there but file was force-tracked)
+
+#### 8.2 SSRF Prevention
+
+- Add DNS resolution check to `is_safe_url` — resolve the hostname and verify IP is not private
+- Add allowlist of permitted domains for scraping
+- Add timeout to DNS resolution to prevent hanging
+
+#### 8.3 Input Validation & Sanitization
+
+- Add `max_length` to `company_url` query parameter
+- Add regex pattern validation for `job_id` path parameter
+- Validate URLs from scraped HTML before passing to `urljoin` (reject `javascript:`, `data:`, `vbscript:`)
+
+#### 8.4 Move from PyMongo to Motor (Async Driver)
+
+- Replace `pymongo.MongoClient` with `motor.motor_asyncio.AsyncIOMotorClient`
+- Remove all `asyncio.to_thread()` wrappers around DB operations
+- Add `motor` to `requirements.txt`
+
+#### 8.5 Fix Rate Limiter Race Condition
+
+- Add `asyncio.Lock` around rate limiter state mutations
+- Consider using a shared Redis-backed rate limiter for multi-worker deployments
+
+### Phase 9: Code Quality & Consistency
+
+#### 9.1 Eliminate Duplicate Code
+
+- Extract `timeAgo` to a shared utility in `job-portal/src/utils/`
+- Consolidate `_company_name_from_url` into one importable location
+- Consolidate `detect_ats` into a single implementation
+- Consolidate `supported_companies` loading into a shared module
+
+#### 9.2 Fix Non-Stable Job ID Generation
+
+- Replace `abs(hash(title + location + source))` with `hashlib.sha256()` based ID in `normalizer.py`
+- This matches the approach already used in `canonicalize_job` in `schemas/job.py`
+
+#### 9.3 Use Pydantic Response Models in API
+
+- Apply the existing `Job` Pydantic model as `response_model` in FastAPI route decorators
+- Ensure consistent `job`/`jobs` key naming across all endpoints
+
+#### 9.4 Fix the CORS Docker Configuration
+
+- Change `CORS_ORIGINS=["*"]` to `CORS_ORIGINS=*` (without brackets) or set proper origin values
+- Verify `config.py` parsing handles both formats correctly
+
+#### 9.5 Add Type Safety
+
+- Replace `dict[str, Any]` with TypedDicts for job payload types
+- Add concrete return type annotations to all functions
+- Run `mypy` in CI
+
+### Phase 10: Database & Performance
+
+#### 10.1 MongoDB Index Optimization
+
+- Add compound text index on `title`, `skills`, `location` for keyword search
+- Add index on `location` for location-only queries
+- Add indexes for `users`, `saved_jobs`, `search_history` collections
+
+#### 10.2 Batch Database Operations
+
+- Replace individual `update_one()` calls with `bulk_write()` using `UpdateOne` operations
+- Apply the same fix to migration script
+
+#### 10.3 HTTP Connection Pooling
+
+- Create a shared `httpx.AsyncClient` singleton per domain instead of per-request clients
+- Configure connection limits (`max_connections`, `max_keepalive_connections`)
+- Use client lifecycle management in the scraper
+
+#### 10.4 Fix Duplicate Sleep in Retry Logic
+
+- Remove the redundant `await asyncio.sleep(...)` call in `request_json_with_retries`
+
+#### 10.5 Frontend Cache Eviction
+
+- Add LRU eviction to the frontend `cacheRef` Map (limit to e.g. 50 entries)
+- Or migrate to a proper caching library
+
+### Phase 11: Frontend Improvements
+
+#### 11.1 Wire Up `useJobs` Hook
+
+- Replace manual data fetching in `FindJobsPage` with the existing `useJobs` hook (which has caching + race condition safety)
+- Remove redundant re-fetch logic
+
+#### 11.2 Implement Server-Side Filtering
+
+- Add `employment_type` and `experience` query params to backend API
+- Send filter values from frontend to backend
+- Remove unused filter fields (`type`, `salary`) or implement them
+
+#### 11.3 Add React Error Boundary
+
+- Wrap the app in an Error Boundary component
+- Show a fallback UI instead of white screen on component crashes
+
+#### 11.4 Add Bundle Splitting
+
+- Use `React.lazy()` + `Suspense` for route-level code splitting
+- Lazy load heavy dependencies
+
+#### 11.5 Fix Vite Proxy Configuration
+
+- Align proxy target port with Docker port or make it configurable via env var
+- Use relative API paths (`/api/jobs`) instead of hardcoded `localhost:8000` in `.env`
+
 ---
 
 ## Priority Matrix
 
 | Feature | Effort | Impact | Priority |
 |---------|--------|--------|----------|
-| JS bundle analysis for API discovery | High | High | P0 |
-| Parallel strategy execution | Low | Medium | P0 |
+| 🔴 Rotate exposed MongoDB credentials + remove from git | Low | Critical | P0 |
+| 🔴 SSRF prevention (DNS resolution check) | Low | High | P0 |
+| 🔴 Fix non-stable `hash()` ID generation | Low | High | P0 |
+| 🔴 JS bundle analysis for API discovery | High | High | P0 |
+| 🔴 Parallel strategy execution | Low | Medium | P0 |
+| Fix CORS Docker config (`["*"]` → `*`) | Low | High | P0 |
+| Fix port consistency (8000 vs 10000) | Low | Medium | P0 |
+| Add `max_length` to `company_url` param | Low | Medium | P0 |
+| Replace `urljoin` with safe URL validator | Low | Medium | P0 |
+| Migrate PyMongo → Motor (async driver) | High | High | P1 |
 | Pagination auto-detection | Medium | High | P1 |
 | API signature profiles (learning) | High | High | P1 |
 | Sitemap/robots.txt parsing | Low | Medium | P1 |
 | Schedule/automation service | Medium | High | P1 |
+| Batch MongoDB upserts (bulk_write) | Low | Medium | P1 |
+| HTTP connection pooling | Medium | Medium | P1 |
+| Add MongoDB text indexes | Low | High | P1 |
+| Wire up `useJobs` hook in frontend | Medium | Medium | P1 |
+| Implement server-side filtering | Medium | High | P1 |
+| Add React Error Boundary | Low | Medium | P1 |
 | Proactive Playwright mode | Low | Medium | P2 |
 | GraphQL introspection | Medium | Medium | P2 |
-| Source map analysis | High | Low | P3 |
-| Webhook support | Medium | Medium | P3 |
 | Circuit breaker pattern | Low | Medium | P2 |
 | Metrics dashboard | Medium | Low | P2 |
+| Self-healing selectors | High | Medium | P2 |
+| Fix rate limiter race condition | Low | Medium | P2 |
+| Fix duplicate sleep in retry logic | Low | Low | P2 |
+| Frontend cache eviction (LRU) | Low | Medium | P2 |
+| Add bundle splitting | Medium | Low | P2 |
+| Eliminate duplicate code | Medium | Low | P2 |
+| Source map analysis | High | Low | P3 |
+| Webhook support | Medium | Medium | P3 |
 | OpenAPI detection | Low | Low | P3 |
+| Pydantic response models | Medium | Low | P3 |
+| Frontend tests | High | Medium | P3 |
+| Chaos testing | High | Low | P3 |
 
 ---
 
@@ -252,14 +392,14 @@ FAILURE_TYPES = {
 
 ```
 scrapers/
-├── scrape_jobs.py              # CLI entry (unchanged)
+├── scrape_jobs.py              # CLI entry (minor fixes: stable ID gen, url validation)
 ├── scheduler.py                # NEW: background scheduler
 ├── company_urls.json           # Existing
 └── crawlers/
     ├── __init__.py
-    ├── base.py                 # Existing
+    ├── base.py                 # FIX: HTTP pooling, retry sleep, safe urljoin, detect_ats dedup
     ├── orchestrator.py         # Minor: parallel dispatch
-    ├── universal.py            # Minor: parallel extraction
+    ├── universal.py            # FIX: ensure_company_urls lock, parallel extraction
     ├── api_discovery/
     │   ├── __init__.py
     │   ├── js_analyzer.py      # NEW: JS bundle / AST analysis
@@ -276,11 +416,48 @@ scrapers/
         ├── __init__.py
         ├── metrics.py          # NEW: Prometheus metrics
         └── audit.py            # NEW: scrape audit logger
+
+app/
+├── main.py                     # FIX: add Error Boundary, serve frontend in prod
+├── config.py                   # FIX: add JWT settings, fix CORS parsing
+├── api/jobs.py                 # FIX: max_length validation, Pydantic responses, consistent shapes
+├── schemas/
+│   ├── job.py                  # Existing (canonicalize_job stays)
+│   └── user.py                 # NEW: UserCreate, UserLogin, UserPublic, TokenResponse
+├── db/mongo.py                 # FIX: migrate to Motor, add indexes, fix ping timeout
+└── services/
+    ├── job_store.py            # FIX: bulk_write, Motor async, add indexes
+    ├── cache.py                # FIX: add logging on hit/miss/eviction
+    ├── ai_parser.py            # Existing
+    ├── normalizer.py           # FIX: stable hashlib-based ID
+    └── security.py             # FIX: DNS rebinding check, rate limiter lock
+
+job-portal/src/
+├── utils/
+│   └── timeAgo.js              # NEW: shared utility
+├── hooks/
+│   └── useJobs.js              # FIX: LRU eviction
+├── components/
+│   ├── ErrorBoundary.jsx       # NEW
+│   └── Filters.jsx             # FIX: remove unused fields
+├── pages/
+│   ├── FindJobsPage.jsx        # FIX: use useJobs hook, send filters to API
+│   └── JobDetailPage.jsx       # FIX: import timeAgo from utils, noopener
+├── .env                        # FIX: use relative API paths
+└── vite.config.js              # FIX: align proxy target with Docker port
 ```
 
 ## Quick Wins (Implement First)
 
-1. **Parallel extraction** — minimal code change, immediate speedup
-2. **Sitemap/robots.txt parsing** — ~50 lines, discovers job URLs for many sites
-3. **Pagination auto-detection** — eliminates hardcoded page params
-4. **Proactive Playwright for known SPAs** — reduces silent empty results
+1. **Rotate exposed MongoDB credentials + delete `.env` from git** — CRITICAL security issue
+2. **Fix non-stable `hash()` ID generation** — prevents duplicate job entries across restarts
+3. **Add `max_length` to `company_url` param** — prevents DoS via oversized URLs
+4. **Fix CORS Docker config** — `["*"]` → `*` so CORS works in deployment
+5. **Parallel extraction** — minimal code change, immediate speedup
+6. **Sitemap/robots.txt parsing** — ~50 lines, discovers job URLs for many sites
+7. **Pagination auto-detection** — eliminates hardcoded page params
+8. **Fix duplicate sleep in retry logic** — removes accidental double backoff
+9. **Replace `urljoin` with safe URL validator** — prevents `javascript:` XSS vector
+10. **Add React Error Boundary** — prevents white screen crashes
+
+
