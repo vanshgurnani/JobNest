@@ -686,7 +686,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     if args.mode == "db":
         LOGGER.info("[DB MODE] Connecting to MongoDB...")
-        await connect_mongo()
+        await asyncio.to_thread(connect_mongo)
 
     total_scraped = 0
     all_collected_jobs: list[dict[str, Any]] = []
@@ -748,7 +748,7 @@ async def _run(args: argparse.Namespace) -> None:
     finally:
         if args.mode == "db":
             LOGGER.info("[DB MODE] Closing MongoDB connection...")
-            await close_mongo()
+            await asyncio.to_thread(close_mongo)
 
 
 def main() -> None:

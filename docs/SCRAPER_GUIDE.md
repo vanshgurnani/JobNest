@@ -30,7 +30,7 @@ Ensure you have the Python dependencies installed:
 pip install -r requirements.txt
 ```
 
-Key dependencies: `httpx`, `beautifulsoup4`, `lxml`, `motor`, `pydantic`
+Key dependencies: `httpx`, `beautifulsoup4`, `lxml`, `pymongo`, `pydantic`
 
 ## Usage
 

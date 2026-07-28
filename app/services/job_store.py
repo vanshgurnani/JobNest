@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -63,10 +64,9 @@ def _build_filter(
     return query
 
 
-async def upsert_jobs(jobs: list[dict[str, Any]]) -> None:
+def _upsert_jobs_sync(jobs: list[dict[str, Any]]) -> None:
     if not jobs:
         return
-
     db = get_db()
     crawled_at = _now()
     for raw_job in jobs:
@@ -74,14 +74,18 @@ async def upsert_jobs(jobs: list[dict[str, Any]]) -> None:
         if not job.get("id"):
             continue
         job["crawled_at"] = crawled_at
-        await db.jobs.update_one(
+        db.jobs.update_one(
             {"id": job["id"]},
             {"$set": job, "$setOnInsert": {"first_seen_at": crawled_at}},
             upsert=True,
         )
 
 
-async def find_jobs(
+async def upsert_jobs(jobs: list[dict[str, Any]]) -> None:
+    await asyncio.to_thread(_upsert_jobs_sync, jobs)
+
+
+def _find_jobs_sync(
     *,
     company: str | None = None,
     keyword: str | None = None,
@@ -93,28 +97,56 @@ async def find_jobs(
     db = get_db()
     query = _build_filter(company=company, keyword=keyword, location=location, fresh_only=fresh_only)
     skip = max(page - 1, 0) * limit
-    total = await db.jobs.count_documents(query)
+    total = db.jobs.count_documents(query)
     cursor = (
         db.jobs.find(query)
         .sort([("posted_date", DESCENDING), ("crawled_at", DESCENDING), ("title", ASCENDING)])
         .skip(skip)
         .limit(limit)
     )
-    jobs = [_serialize_job(job) async for job in cursor]
+    jobs = [_serialize_job(job) for job in cursor]
     return jobs, total
 
 
-async def find_companies() -> list[str]:
+async def find_jobs(
+    *,
+    company: str | None = None,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+    fresh_only: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
+    return await asyncio.to_thread(
+        _find_jobs_sync,
+        company=company,
+        keyword=keyword,
+        location=location,
+        page=page,
+        limit=limit,
+        fresh_only=fresh_only,
+    )
+
+
+def _find_companies_sync() -> list[str]:
     db = get_db()
     pipeline = [
         {"$group": {"_id": "$company"}},
         {"$sort": {"_id": 1}},
     ]
     cursor = db.jobs.aggregate(pipeline)
-    return [doc["_id"] async for doc in cursor if doc["_id"]]
+    return [doc["_id"] for doc in cursor if doc["_id"]]
+
+
+async def find_companies() -> list[str]:
+    return await asyncio.to_thread(_find_companies_sync)
+
+
+def _find_job_by_id_sync(job_id: str) -> dict[str, Any] | None:
+    db = get_db()
+    job = db.jobs.find_one({"$or": [{"id": job_id}, {"job_id": job_id}]})
+    return _serialize_job(job) if job else None
 
 
 async def find_job_by_id(job_id: str) -> dict[str, Any] | None:
-    db = get_db()
-    job = await db.jobs.find_one({"$or": [{"id": job_id}, {"job_id": job_id}]})
-    return _serialize_job(job) if job else None
+    return await asyncio.to_thread(_find_job_by_id_sync, job_id)

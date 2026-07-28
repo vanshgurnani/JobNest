@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        await connect_mongo()
+        await asyncio.to_thread(connect_mongo)
         app.state.mongo_available = True
     except Exception as exc:
         logger.warning("MongoDB unavailable; running with live crawl + memory cache only: %s", exc)
@@ -23,7 +24,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await close_mongo()
+    await asyncio.to_thread(close_mongo)
 
 
 settings = get_settings()
@@ -48,7 +49,7 @@ async def health(request: Request) -> dict[str, str] | Response:
         return Response(status_code=200)
     status = {"status": "running", "mongodb": "unavailable"}
     try:
-        status.update(await ping_mongo())
+        status.update(await asyncio.to_thread(ping_mongo))
     except Exception:
         pass
     return status
