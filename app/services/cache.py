@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import OrderedDict
 from typing import Any, Generic, TypeVar
@@ -8,6 +9,7 @@ from typing import Any, Generic, TypeVar
 from app.config import get_settings
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class TTLCache(Generic[T]):
@@ -27,8 +29,10 @@ class TTLCache(Generic[T]):
             value, expires_at = entry
             if time.monotonic() >= expires_at:
                 del self._store[key]
+                logger.debug("Cache expired: %s", key)
                 return None
             self._store.move_to_end(key)
+            logger.debug("Cache hit: %s", key)
             return value
 
     async def set(self, key: str, value: T) -> None:
@@ -37,7 +41,8 @@ class TTLCache(Generic[T]):
             self._store[key] = (value, expires_at)
             self._store.move_to_end(key)
             while len(self._store) > self._max_entries:
-                self._store.popitem(last=False)
+                evicted = self._store.popitem(last=False)
+                logger.debug("Cache evicted: %s", evicted[0])
 
     async def delete(self, key: str) -> None:
         async with self._lock:

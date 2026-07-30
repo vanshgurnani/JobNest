@@ -22,7 +22,8 @@ from scrapers.crawlers.base import request_with_retries
 from app.db.mongo import close_mongo, connect_mongo
 from app.schemas.job import canonicalize_job
 from app.services.job_store import upsert_jobs
-from scrapers.crawlers.orchestrator import crawl_jobs, supported_companies
+from scrapers.crawlers.orchestrator import crawl_jobs
+from scrapers.utils import company_name_from_url, detect_ats, supported_companies
 
 LOGGER = logging.getLogger("scrapers.scrape_jobs")
 
@@ -61,24 +62,6 @@ def _format_jobs_preview(jobs: list[dict[str, Any]]) -> str:
             "source": job.get("source"),
         })
     return json.dumps(preview, indent=2, ensure_ascii=False)
-
-
-def detect_ats(url: str, html: str = "") -> str | None:
-    searchable = f"{url}\n{html}"
-
-    _ATS_PATTERNS: list[tuple[str, str]] = [
-        ("greenhouse", r"boards\.greenhouse\.io"),
-        ("lever", r"jobs\.lever\.co"),
-        ("workday", r"myworkdayjobs\.com"),
-        ("smartrecruiters", r"smartrecruiters\.com"),
-        ("ashby", r"ashbyhq\.com"),
-        ("oraclecloud", r"oraclecloud\.com/hcmUI/CandidateExperience"),
-    ]
-
-    for name, pattern in _ATS_PATTERNS:
-        if re.search(pattern, searchable, re.IGNORECASE):
-            return name
-    return None
 
 
 class GenericScraper:
@@ -491,14 +474,7 @@ def _slice_and_filter(
     return jobs[:limit]
 
 
-def _company_name_from_url(url: str) -> str:
-    parsed = urlparse(url if url.startswith("http") else f"https://{url}")
-    host = parsed.netloc.lower().removeprefix("www.")
-    labels = [
-        label for label in host.split(".")
-        if label and label not in {"careers", "jobs", "apply"}
-    ]
-    return (labels[0].replace("-", " ")) if labels else "company"
+_company_name_from_url = company_name_from_url
 
 
 class _ATSScraper:
@@ -555,13 +531,16 @@ async def _scrape_company(
     page_size: int,
     delay_seconds: float,
     generic_only: bool = False,
+    use_playwright: bool = False,
 ) -> list[dict[str, Any]]:
     all_jobs: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     label = company_url or company or "unknown"
 
     _scraper: GenericScraper | None = None
-    if company_url and not company:
+    if use_playwright:
+        LOGGER.info("[PLAYWRIGHT] Playwright mode enabled for '%s' — skipping routed scrapers", label)
+    elif company_url and not company:
         if generic_only:
             company_name = _company_name_from_url(company_url)
             LOGGER.info("[INFO] Using scraper: generic (forced)")
@@ -597,6 +576,7 @@ async def _scrape_company(
                     location=location,
                     page=page,
                     limit=page_size,
+                    use_playwright=use_playwright,
                 )
         else:
             results = await crawl_jobs(
@@ -606,6 +586,7 @@ async def _scrape_company(
                 location=location,
                 page=page,
                 limit=page_size,
+                use_playwright=use_playwright,
             )
 
         page_jobs: list[dict[str, Any]] = []
@@ -636,6 +617,7 @@ async def _scrape_company(
                 location=location,
                 page=page,
                 limit=page_size,
+                use_playwright=use_playwright,
             )
             for result in results:
                 for raw_job in result.get("jobs", []):

@@ -3,26 +3,26 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_client: MongoClient | None = None
+_client: AsyncIOMotorClient | None = None
 _db: Any = None
 
 
-def connect_mongo() -> None:
+async def connect_mongo() -> None:
     global _client, _db
     settings = get_settings()
-    _client = MongoClient(settings.mongodb_uri)
+    _client = AsyncIOMotorClient(settings.mongodb_uri)
     _db = _client[settings.mongodb_db]
-    _ensure_indexes()
+    await _ensure_indexes()
     logger.info("Connected to MongoDB database: %s", settings.mongodb_db)
 
 
-def close_mongo() -> None:
+async def close_mongo() -> None:
     global _client, _db
     if _client is not None:
         _client.close()
@@ -36,14 +36,16 @@ def get_db() -> Any:
     return _db
 
 
-def _ensure_indexes() -> None:
+async def _ensure_indexes() -> None:
     db = get_db()
-    db.jobs.create_index("id", unique=True)
-    db.jobs.create_index([("company", 1), ("crawled_at", -1)])
-    db.jobs.create_index("title")
+    await db.jobs.create_index("id", unique=True)
+    await db.jobs.create_index([("company", 1), ("crawled_at", -1)])
+    await db.jobs.create_index("title")
+    await db.jobs.create_index([("title", "text"), ("skills", "text"), ("location", "text")])
+    await db.jobs.create_index("location")
 
 
-def ping_mongo() -> dict[str, Any]:
+async def ping_mongo() -> dict[str, Any]:
     db = get_db()
-    db.command("ping")
+    await db.command("ping")
     return {"mongodb": "connected", "database": db.name}

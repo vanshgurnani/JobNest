@@ -2,8 +2,15 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchJobs } from '../services/api';
 
 const CACHE_TTL = 10 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 50;
 
-export function useJobs({ company, keyword, location } = {}) {
+function lruEvict(map, max) {
+  if (map.size <= max) return;
+  const first = map.keys().next().value;
+  if (first) map.delete(first);
+}
+
+export function useJobs({ company, keyword, location, employmentType, experience } = {}) {
   const [data, setData] = useState({ jobs: [], total: 0, page: 1 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -12,7 +19,7 @@ export function useJobs({ company, keyword, location } = {}) {
 
   const load = useCallback(
     async (page = 1, append = false) => {
-      const cacheKey = JSON.stringify({ company, keyword, location, page });
+      const cacheKey = JSON.stringify({ company, keyword, location, employmentType, experience, page });
       const cached = cacheRef.current.get(cacheKey);
       if (cached && Date.now() - cached.at < CACHE_TTL) {
         setData((prev) => ({
@@ -35,10 +42,11 @@ export function useJobs({ company, keyword, location } = {}) {
       }
 
       try {
-        const result = await fetchJobs({ company, keyword, location, page });
+        const result = await fetchJobs({ company, keyword, location, employmentType, experience, page });
         if (rid !== requestIdRef.current) return;
 
         cacheRef.current.set(cacheKey, { jobs: result.jobs, total: result.total, at: Date.now() });
+        lruEvict(cacheRef.current, MAX_CACHE_ENTRIES);
 
         setData((prev) => ({
           jobs: append ? [...prev.jobs, ...result.jobs] : result.jobs,
@@ -54,7 +62,7 @@ export function useJobs({ company, keyword, location } = {}) {
         }
       }
     },
-    [company, keyword, location],
+    [company, keyword, location, employmentType, experience],
   );
 
   useEffect(() => {

@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from pydantic import BaseModel, Field
+from typing import Any, Optional, TypedDict
 
 
 class Job(BaseModel):
@@ -63,3 +64,36 @@ def canonicalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "posted_date": str(job.get("posted_date") or job.get("date_posted") or "").strip(),
         "valid_through": str(job.get("valid_through") or "").strip(),
     }
+
+
+class JobListResponse(BaseModel):
+    total: int = 0
+    jobs: list[Job] = []
+    latest_jobs: list[Job] = []
+    page: int = 1
+    limit: int = 20
+    cache: str = ""
+
+
+class JobDetailResponse(BaseModel):
+    job: Job
+    cache: str = ""
+
+
+class RawJobDict(TypedDict, total=False):
+    id: str
+    job_id: str
+    company: str
+    title: str
+    location: str
+    description: str
+    employment_type: str
+    experience: str
+    skills: list[str]
+    apply_url: str
+    url: str
+    source: str
+    posted_date: str
+    valid_through: str
+    date_posted: str
+    crawled_at: str

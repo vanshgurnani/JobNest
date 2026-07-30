@@ -1,9 +1,12 @@
 import asyncio
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi.responses import FileResponse
 
 from app.api.jobs import router as jobs_router
 from app.config import get_settings
@@ -16,7 +19,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        await asyncio.to_thread(connect_mongo)
+        await connect_mongo()
         app.state.mongo_available = True
     except Exception as exc:
         logger.warning("MongoDB unavailable; running with live crawl + memory cache only: %s", exc)
@@ -24,7 +27,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await asyncio.to_thread(close_mongo)
+    await close_mongo()
 
 
 settings = get_settings()
@@ -41,6 +44,20 @@ app.add_middleware(
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimitMiddleware)
+
+
+@app.on_event("startup")
+async def start_scheduler():
+    try:
+        from scrapers.scheduler import scheduler
+        scheduler.start()
+    except Exception:
+        pass
+
+
+@app.get("/html")
+async def index():
+    return FileResponse(Path(__file__).resolve().parent.parent / "local-frontend.html")
 
 
 @app.route("/health", methods=["GET", "HEAD"])

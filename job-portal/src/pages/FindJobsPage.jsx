@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Filters from '../components/Filters';
 import JobCard from '../components/JobCard';
@@ -6,7 +6,7 @@ import SkeletonCard from '../components/SkeletonCard';
 import Pagination from '../components/Pagination';
 import EmptyState from '../components/EmptyState';
 import ErrorState from '../components/ErrorState';
-import { fetchJobs } from '../services/api';
+import { useJobs } from '../hooks/useJobs';
 
 const PAGE_SIZE = 20;
 
@@ -15,48 +15,21 @@ export default function FindJobsPage() {
   const keywordParam = searchParams.get('keyword') || '';
   const locationParam = searchParams.get('location') || '';
   const companyParam = searchParams.get('company') || '';
+  const employmentTypeParam = searchParams.get('employmentType') || '';
+  const experienceParam = searchParams.get('experience') || '';
 
   const [keyword, setKeyword] = useState(keywordParam);
-  const [filters, setFilters] = useState({ employmentType: '', experience: '' });
-  const [jobs, setJobs] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [filters, setFilters] = useState({ employmentType: employmentTypeParam, experience: experienceParam });
+
+  const { jobs, total, page, loading, error, load } = useJobs({
+    company: companyParam || undefined,
+    keyword: keywordParam || undefined,
+    location: locationParam || undefined,
+  });
 
   useEffect(() => {
     setKeyword(keywordParam);
   }, [keywordParam]);
-
-  const loadJobs = useCallback(
-    async (pg = 1) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const result = await fetchJobs({
-          keyword: keywordParam || undefined,
-          location: locationParam || undefined,
-          company: companyParam || undefined,
-          employmentType: filters.employmentType || undefined,
-          experience: filters.experience || undefined,
-          page: pg,
-          limit: PAGE_SIZE,
-        });
-        setJobs(result.jobs);
-        setTotal(result.total);
-        setPage(pg);
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [keywordParam, locationParam, companyParam, filters.employmentType, filters.experience],
-  );
-
-  useEffect(() => {
-    loadJobs(1);
-  }, [loadJobs]);
 
   function handleSearch(e) {
     e.preventDefault();
@@ -64,21 +37,30 @@ export default function FindJobsPage() {
     if (keyword.trim()) params.set('keyword', keyword.trim());
     if (locationParam) params.set('location', locationParam);
     if (companyParam) params.set('company', companyParam);
+    if (filters.employmentType) params.set('employmentType', filters.employmentType);
+    if (filters.experience) params.set('experience', filters.experience);
     setSearchParams(params);
   }
 
   function handleFilterChange(next) {
     setFilters(next);
+    const params = new URLSearchParams(searchParams);
+    if (next.employmentType) params.set('employmentType', next.employmentType);
+    else params.delete('employmentType');
+    if (next.experience) params.set('experience', next.experience);
+    else params.delete('experience');
+    setSearchParams(params);
   }
 
   function handleClear() {
     setKeyword('');
+    setFilters({ employmentType: '', experience: '' });
     setSearchParams({});
   }
 
   function handlePageChange(pg) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    loadJobs(pg);
+    load(pg);
   }
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -106,7 +88,7 @@ export default function FindJobsPage() {
             </button>
           </form>
 
-          {(keywordParam || locationParam || companyParam) && (
+          {(keywordParam || locationParam || companyParam || employmentTypeParam || experienceParam) && (
             <button onClick={handleClear} className="mt-3 text-sm font-medium text-accent-600 hover:text-accent-700">
               Clear all filters
             </button>
@@ -138,7 +120,7 @@ export default function FindJobsPage() {
             )}
 
             {error && !loading && (
-              <ErrorState message={error} onRetry={() => loadJobs(page)} />
+              <ErrorState message={error} onRetry={() => load(page)} />
             )}
 
             {!loading && !error && jobs.length === 0 && !companyParam && (

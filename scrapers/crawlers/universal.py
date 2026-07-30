@@ -217,7 +217,7 @@ def _looks_like_json_api_url(url: str) -> bool:
         return True
     if path.endswith((".json", "/json")):
         return True
-    api_terms = ("/api/", "/graphql", "/services/", "/rest/", "/wday/cxs/", "/posting-api/", "/requisitions")
+    api_terms = ("/api/", "/graphql", "/rest/", "/wday/cxs/", "/posting-api/", "/requisitions")
     return any(term in path for term in api_terms) or any(term.strip("/") in query for term in api_terms)
 
 
@@ -889,47 +889,52 @@ async def _fetch_jobs_from_candidate_apis(
 
 
 async def _extract_jobs_by_fallback(company: str, careers_url: str, company_base_url: str, html: str) -> list[dict[str, Any]]:
-    jobs: list[dict[str, Any]] = []
+    async def _from_anchors() -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for href in _extract_anchor_urls(html):
+            candidate = _job_from_search_result_url(href, company=company, base_url=careers_url)
+            if candidate and _is_allowed_source_url(candidate["url"], company_base_url):
+                result.append(candidate)
+        return result
 
-    for href in _extract_anchor_urls(html):
-        candidate = _job_from_search_result_url(href, company=company, base_url=careers_url)
-        if candidate and _is_allowed_source_url(candidate["url"], company_base_url):
-            jobs.append(candidate)
+    async def _from_embedded() -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for payload in _extract_embedded_json(html):
+            for job in await _extract_jobs_from_json_payload(payload, company, "embedded-json"):
+                apply_url = job.get("apply_url") or ""
+                if apply_url and not apply_url.startswith("http"):
+                    job["apply_url"] = urljoin(careers_url, apply_url)
+                    apply_url = job["apply_url"]
+                if apply_url and not _is_allowed_source_url(apply_url, company_base_url):
+                    continue
+                result.append(job)
+        return result
 
-    for payload in _extract_embedded_json(html):
-        for job in await _extract_jobs_from_json_payload(payload, company, "embedded-json"):
-            apply_url = job.get("apply_url") or ""
-            if apply_url and not apply_url.startswith("http"):
-                job["apply_url"] = urljoin(careers_url, apply_url)
-                apply_url = job["apply_url"]
-            if apply_url and not _is_allowed_source_url(apply_url, company_base_url):
-                continue
-            jobs.append(job)
-
-    if not jobs:
+    async def _from_html() -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         jobs_from_html = extract_jobs_from_html(html, company=company, base_url=careers_url)
         for j in jobs_from_html:
             if not j.get("apply_url"):
                 j["apply_url"] = j.get("url", "")
             if j.get("url") and not _is_allowed_source_url(j["url"], company_base_url):
                 continue
-            jobs.append(
-                {
-                    "company": j.get("company", company).title(),
-                    "job_id": j.get("job_id", ""),
-                    "title": j.get("title", ""),
-                    "location": j.get("location", ""),
-                    "description": j.get("description", ""),
-                    "skills": j.get("skills", []),
-                    "employment_type": "",
-                    "experience": "",
-                    "apply_url": j.get("url", ""),
-                    "source": "html",
-                    "url": j.get("url", ""),
-                }
-            )
+            result.append({
+                "company": j.get("company", company).title(),
+                "job_id": j.get("job_id", ""),
+                "title": j.get("title", ""),
+                "location": j.get("location", ""),
+                "description": j.get("description", ""),
+                "skills": j.get("skills", []),
+                "employment_type": "",
+                "experience": "",
+                "apply_url": j.get("url", ""),
+                "source": "html",
+                "url": j.get("url", ""),
+            })
+        return result
 
-    if not jobs:
+    async def _from_jsonld() -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         jsonld = _extract_jsonld_jobpostings(html)
         for j in jsonld:
             parsed = _parse_jsonld_jobposting(j)
@@ -939,24 +944,42 @@ async def _extract_jobs_by_fallback(company: str, careers_url: str, company_base
             if apply_url and not _is_allowed_source_url(urljoin(careers_url, apply_url), company_base_url):
                 continue
             job_id = parsed.get("job_id") or ""
-            normalized = normalize_job_payload(
-                {
-                    "job_id": job_id,
-                    "title": parsed.get("title"),
-                    "location": parsed.get("location"),
-                    "description": parsed.get("description"),
-                    "apply_url": urljoin(careers_url, apply_url) if apply_url else careers_url,
-                    "employment_type": "",
-                    "experience": "",
-                    "skills": [],
-                },
-                company,
-                "jsonld",
-            )
+            normalized = normalize_job_payload({
+                "job_id": job_id,
+                "title": parsed.get("title"),
+                "location": parsed.get("location"),
+                "description": parsed.get("description"),
+                "apply_url": urljoin(careers_url, apply_url) if apply_url else careers_url,
+                "employment_type": "",
+                "experience": "",
+                "skills": [],
+            }, company, "jsonld")
             normalized["posted_date"] = parsed.get("posted_date", "")
             normalized["valid_through"] = parsed.get("valid_through", "")
-            jobs.append(normalized)
+            result.append(normalized)
+        return result
 
+    results = await asyncio.gather(
+        _from_anchors(),
+        _from_embedded(),
+        _from_html(),
+        _from_jsonld(),
+        return_exceptions=True,
+    )
+
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in results:
+        if isinstance(r, Exception):
+            logger.warning("Parallel extraction strategy failed: %s", r)
+            continue
+        for job in r:
+            key = (job.get("title", "") + job.get("company", "") + job.get("location", "")).lower()
+            if key and key not in seen:
+                seen.add(key)
+                jobs.append(job)
+
+    logger.info("Parallel extraction: %d total jobs from %s", len(jobs), company)
     return jobs
 
 
@@ -976,7 +999,9 @@ async def _extract_jobs_with_playwright(
         return []
 
     api_responses: list[dict[str, Any]] = []
+    api_requests: list[dict[str, Any]] = []
     rendered_html: str | None = None
+    logger.info("Playwright launching browser for %s", url)
 
     try:
         async with async_playwright() as p:
@@ -996,14 +1021,73 @@ async def _extract_jobs_with_playwright(
                     try:
                         body = await response.json()
                         if body:
-                            api_responses.append(body)
+                            api_responses.append({"url": response.url, "body": body})
+                    except Exception:
+                        pass
+
+            async def handle_request(request):
+                if request.url and ("typesense" in request.url or "multi_search" in request.url):
+                    try:
+                        api_requests.append({
+                            "url": request.url,
+                            "method": request.method,
+                            "headers": dict(request.headers),
+                            "post_data": request.post_data,
+                        })
                     except Exception:
                         pass
 
             page_obj.on("response", handle_response)
+            page_obj.on("request", handle_request)
 
-            await page_obj.goto(url, wait_until="networkidle", timeout=30000)
-            await page_obj.wait_for_timeout(2000)
+            await page_obj.goto(url, wait_until="load", timeout=15000)
+            await page_obj.wait_for_timeout(1500)
+
+            job_api_urls = [r["url"] for r in api_responses
+                           if any(kw in r["url"] for kw in ("search", "job", "career", "requisition", "position", "posting"))]
+            if not job_api_urls:
+                await page_obj.wait_for_timeout(4000)
+
+            if page > 1:
+                replayed = False
+                if api_requests and api_responses:
+                    for resp_entry in api_responses:
+                        resp_body = resp_entry["body"] if isinstance(resp_entry, dict) and "body" in resp_entry else resp_entry
+                        if not isinstance(resp_body, dict):
+                            continue
+                        searches = resp_body.get("searches") or resp_body.get("results")
+                        if not searches or not isinstance(searches, list):
+                            continue
+                        for sr in searches:
+                            found = sr.get("found", 0)
+                            per_page_val = sr.get("per_page", 10)
+                            if found > (page - 1) * per_page_val:
+                                req = api_requests[0]
+                                if req and req.get("post_data"):
+                                    try:
+                                        body_data = json.loads(req["post_data"])
+                                        for s in body_data.get("searches", []):
+                                            s["page"] = page
+                                        clean_url = req["url"].split("&_token")[0] if "_token" in req["url"] else req["url"]
+                                        async with httpx.AsyncClient() as cl:
+                                            http_resp = await cl.post(
+                                                clean_url,
+                                                content=json.dumps(body_data),
+                                                headers={"content-type": "text/plain"},
+                                                timeout=15,
+                                            )
+                                            if http_resp.status_code == 200:
+                                                api_responses.clear()
+                                                api_responses.append({"url": clean_url, "body": http_resp.json()})
+                                                logger.info("Playwright fetched page %d from TypeSense API for %s", page, url)
+                                                replayed = True
+                                    except Exception as e:
+                                        logger.warning("Failed to fetch TypeSense page %d: %s", page, e)
+                                break
+                        if replayed:
+                            break
+                if not replayed:
+                    api_responses.clear()
 
             rendered_html = await page_obj.content()
             await browser.close()
@@ -1012,12 +1096,32 @@ async def _extract_jobs_with_playwright(
         return []
 
     all_jobs: list[dict[str, Any]] = []
+    logger.info("Playwright captured %d API responses for %s", len(api_responses), url)
 
-    for payload in api_responses:
+    for resp_entry in api_responses:
+        resp_url = resp_entry.get("url", "") if isinstance(resp_entry, dict) else ""
+        payload = resp_entry["body"] if isinstance(resp_entry, dict) and "body" in resp_entry else resp_entry
         extracted = await _extract_jobs_from_json_payload(payload, company, "playwright-api")
+        if extracted:
+            logger.info("Playwright extracted %d items from %s", len(extracted), resp_url[:80])
         for job in extracted:
             if job.get("title"):
+                job["_api_url"] = resp_url
                 all_jobs.append(job)
+
+    if all_jobs:
+        is_job_api = lambda u: any(kw in u for kw in ("search", "job", "career", "requisition", "position", "posting"))
+        job_api_jobs = [j for j in all_jobs if is_job_api(j.get("_api_url", ""))]
+        if job_api_jobs:
+            all_jobs = job_api_jobs
+
+        _job_url_pat = re.compile(r"/job(?:s|detail)?/\d+|jobId=|requisition|position/\d+", re.IGNORECASE)
+        real_jobs = [j for j in all_jobs if j.get("job_id") or _job_url_pat.search(j.get("apply_url", "") or "")]
+        if real_jobs:
+            all_jobs = real_jobs
+
+        for j in all_jobs:
+            j.pop("_api_url", None)
 
     if not all_jobs and rendered_html:
         ats = detect_ats(url, rendered_html)
@@ -1253,12 +1357,111 @@ async def universal_crawl_jobs(
     location: str | None = None,
     page: int = 1,
     limit: int = 20,
+    use_playwright: bool = False,
 ) -> list[dict[str, Any]]:
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/126.0.0.0 Safari/537.36"
     )
+
+    if use_playwright:
+        if not company_url:
+            from scrapers.utils import supported_companies
+            _urls_path = Path(__file__).resolve().parent.parent / "company_urls.json"
+            try:
+                _mapping = json.loads(_urls_path.read_text())
+                company_url = _mapping.get(company_name.lower(), "")
+            except Exception:
+                pass
+        target_url = company_url or f"https://{company_name.replace(' ', '')}.com/careers"
+        pw_jobs = await _extract_jobs_with_playwright(
+            target_url,
+            company_name,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+        )
+        pw_jobs = _normalize_universal_output(pw_jobs, company=company_name, careers_url=target_url)
+        pw_jobs = _dedupe_jobs(pw_jobs)
+
+        def _is_category_item(j):
+            u = (j.get("url") or j.get("apply_url") or "").strip()
+            if j.get("location") or j.get("job_id"):
+                return False
+            if not u or u == target_url:
+                return True
+            path = urlparse(u).path.lower()
+            if any(p in path for p in ("/job/", "/jobs/", "/detail/", "/position/", "/requisition/", "/opening/", "/apply/")):
+                return False
+            return True
+
+        real_jobs = [j for j in pw_jobs if not _is_category_item(j)]
+        logger.info("Playwright extracted %d raw items, %d real jobs for %s", len(pw_jobs), len(real_jobs), company_name)
+
+        cat_link_candidates = []
+        for j in pw_jobs:
+            u = (j.get("url") or j.get("apply_url") or "").strip()
+            if not u or u == target_url or u.startswith("mailto:"):
+                continue
+            if urlparse(u).netloc.lower() != urlparse(target_url).netloc.lower():
+                continue
+            if u not in cat_link_candidates:
+                cat_link_candidates.append(u)
+        if not real_jobs and cat_link_candidates:
+            if keyword:
+                kw = keyword.lower()
+                cat_link_candidates.sort(key=lambda u: 0 if kw in u.lower() else 1)
+            for cl in cat_link_candidates[:2]:
+                logger.info("Playwright following category link: %s", cl)
+                await asyncio.sleep(0.3)
+                sub = await _extract_jobs_with_playwright(cl, company_name, keyword=keyword, location=location, page=page, limit=limit)
+                if sub:
+                    sub = _normalize_universal_output(sub, company=company_name, careers_url=cl)
+                    sub = _dedupe_jobs(sub)
+                    real_sub = [j for j in sub if not _is_category_item(j)]
+                    if real_sub:
+                        real_jobs.extend(real_sub)
+                        break
+
+        def _location_matches(flt: str, job_loc: str) -> bool:
+            flt_lower, job_lower = flt.lower().strip(), job_loc.lower().strip()
+            if flt_lower in job_lower:
+                return True
+            flt_words = set(flt_lower.replace(",", "").split())
+            job_words = set(job_lower.replace(",", "").split())
+            if flt_words & job_words:
+                return True
+            _abbrevs: dict[str, str] = {}
+            for country, code in (
+                ("india", "in"), ("germany", "de"), ("france", "fr"), ("spain", "es"),
+                ("italy", "it"), ("netherlands", "nl"), ("belgium", "be"), ("switzerland", "ch"),
+                ("sweden", "se"), ("norway", "no"), ("denmark", "dk"), ("finland", "fi"),
+                ("austria", "at"), ("poland", "pl"), ("portugal", "pt"), ("ireland", "ie"),
+                ("japan", "jp"), ("china", "cn"), ("australia", "au"), ("canada", "ca"),
+                ("brazil", "br"), ("mexico", "mx"), ("singapore", "sg"), ("malaysia", "my"),
+                ("united states", "us"), ("usa", "us"), ("united kingdom", "uk"), ("uk", "gb"),
+            ):
+                _abbrevs[country] = code
+            code = _abbrevs.get(flt_lower)
+            if code and code in job_words:
+                return True
+            return False
+
+        filtered: list[dict[str, Any]] = []
+        for j in (real_jobs if real_jobs else pw_jobs):
+            if _is_expired(j):
+                continue
+            if location and not _location_matches(location, j.get("location", "")):
+                if j.get("location"):
+                    continue
+            if keyword:
+                k = keyword.lower()
+                if k not in (j.get("title", "") or "").lower() and k not in (j.get("description", "") or "").lower():
+                    continue
+            filtered.append(j)
+        return filtered[:limit]
 
     async with httpx.AsyncClient(
         headers={"User-Agent": ua},

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import BulkWriteError
 
 from app.config import get_settings
 from app.db.mongo import get_db
@@ -42,12 +43,16 @@ def _build_filter(
     company: str | None = None,
     keyword: str | None = None,
     location: str | None = None,
+    employment_type: str | None = None,
+    experience: str | None = None,
     fresh_only: bool = False,
 ) -> dict[str, Any]:
     query: dict[str, Any] = {}
     company = _validate_search_input(company, "Company")
     keyword = _validate_search_input(keyword, "Keyword")
     location = _validate_search_input(location, "Location")
+    employment_type = _validate_search_input(employment_type, "EmploymentType")
+    experience = _validate_search_input(experience, "Experience")
     if company:
         query["company"] = {"$regex": f"^{re.escape(company)}$", "$options": "i"}
     if keyword:
@@ -58,54 +63,42 @@ def _build_filter(
         ]
     if location:
         query["location"] = {"$regex": re.escape(location), "$options": "i"}
+    if employment_type:
+        query["employment_type"] = {"$regex": f"^{re.escape(employment_type)}$", "$options": "i"}
+    if experience:
+        query["experience"] = {"$regex": f"^{re.escape(experience)}$", "$options": "i"}
     if fresh_only:
         ttl = get_settings().cache_ttl_seconds
         query["crawled_at"] = {"$gte": _now() - timedelta(seconds=ttl)}
     return query
 
 
-def _upsert_jobs_sync(jobs: list[dict[str, Any]]) -> None:
+async def upsert_jobs(jobs: list[dict[str, Any]]) -> None:
     if not jobs:
         return
     db = get_db()
     crawled_at = _now()
+    operations: list[Any] = []
     for raw_job in jobs:
         job = canonicalize_job(raw_job)
         if not job.get("id"):
             continue
         job["crawled_at"] = crawled_at
-        db.jobs.update_one(
-            {"id": job["id"]},
-            {"$set": job, "$setOnInsert": {"first_seen_at": crawled_at}},
-            upsert=True,
+        from pymongo import UpdateOne
+
+        operations.append(
+            UpdateOne(
+                {"id": job["id"]},
+                {"$set": job, "$setOnInsert": {"first_seen_at": crawled_at}},
+                upsert=True,
+            )
         )
-
-
-async def upsert_jobs(jobs: list[dict[str, Any]]) -> None:
-    await asyncio.to_thread(_upsert_jobs_sync, jobs)
-
-
-def _find_jobs_sync(
-    *,
-    company: str | None = None,
-    keyword: str | None = None,
-    location: str | None = None,
-    page: int = 1,
-    limit: int = 20,
-    fresh_only: bool = False,
-) -> tuple[list[dict[str, Any]], int]:
-    db = get_db()
-    query = _build_filter(company=company, keyword=keyword, location=location, fresh_only=fresh_only)
-    skip = max(page - 1, 0) * limit
-    total = db.jobs.count_documents(query)
-    cursor = (
-        db.jobs.find(query)
-        .sort([("posted_date", DESCENDING), ("crawled_at", DESCENDING), ("title", ASCENDING)])
-        .skip(skip)
-        .limit(limit)
-    )
-    jobs = [_serialize_job(job) for job in cursor]
-    return jobs, total
+    if operations:
+        try:
+            await db.jobs.bulk_write(operations, ordered=False)
+        except BulkWriteError as e:
+            if any(err.get("code") != 11000 for err in e.details.get("writeErrors", [])):
+                raise
 
 
 async def find_jobs(
@@ -113,40 +106,37 @@ async def find_jobs(
     company: str | None = None,
     keyword: str | None = None,
     location: str | None = None,
+    employment_type: str | None = None,
+    experience: str | None = None,
     page: int = 1,
     limit: int = 20,
     fresh_only: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
-    return await asyncio.to_thread(
-        _find_jobs_sync,
-        company=company,
-        keyword=keyword,
-        location=location,
-        page=page,
-        limit=limit,
-        fresh_only=fresh_only,
+    db = get_db()
+    query = _build_filter(company=company, keyword=keyword, location=location, employment_type=employment_type, experience=experience, fresh_only=fresh_only)
+    skip = max(page - 1, 0) * limit
+    total = await db.jobs.count_documents(query)
+    cursor = (
+        db.jobs.find(query)
+        .sort([("posted_date", DESCENDING), ("crawled_at", DESCENDING), ("title", ASCENDING)])
+        .skip(skip)
+        .limit(limit)
     )
+    jobs = [_serialize_job(job) async for job in cursor]
+    return jobs, total
 
 
-def _find_companies_sync() -> list[str]:
+async def find_companies() -> list[str]:
     db = get_db()
     pipeline = [
         {"$group": {"_id": "$company"}},
         {"$sort": {"_id": 1}},
     ]
     cursor = db.jobs.aggregate(pipeline)
-    return [doc["_id"] for doc in cursor if doc["_id"]]
-
-
-async def find_companies() -> list[str]:
-    return await asyncio.to_thread(_find_companies_sync)
-
-
-def _find_job_by_id_sync(job_id: str) -> dict[str, Any] | None:
-    db = get_db()
-    job = db.jobs.find_one({"$or": [{"id": job_id}, {"job_id": job_id}]})
-    return _serialize_job(job) if job else None
+    return [doc["_id"] async for doc in cursor if doc["_id"]]
 
 
 async def find_job_by_id(job_id: str) -> dict[str, Any] | None:
-    return await asyncio.to_thread(_find_job_by_id_sync, job_id)
+    db = get_db()
+    job = await db.jobs.find_one({"$or": [{"id": job_id}, {"job_id": job_id}]})
+    return _serialize_job(job) if job else None

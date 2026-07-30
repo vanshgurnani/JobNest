@@ -1,9 +1,13 @@
+import asyncio
 import ipaddress
 import re
+import socket
 import time
 from collections import defaultdict
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
+import httpx
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
@@ -32,12 +36,19 @@ _HOSTNAME_BLOCKLIST = re.compile(
     re.IGNORECASE,
 )
 
+_FORBIDDEN_URL_SCHEMES = re.compile(r"^(javascript|data|vbscript|file|about|blob):", re.IGNORECASE)
+
 _MAX_URL_LENGTH = 2048
 
+_shared_client: httpx.AsyncClient | None = None
+_shared_client_lock = asyncio.Lock()
 
-def is_safe_url(url: str) -> tuple[bool, str]:
+
+async def is_safe_url(url: str) -> tuple[bool, str]:
     if len(url) > _MAX_URL_LENGTH:
         return False, "URL exceeds maximum length"
+    if _FORBIDDEN_URL_SCHEMES.match(url):
+        return False, "URL uses a forbidden scheme"
     if not url.startswith(("http://", "https://")):
         return False, "Only http/https URLs are allowed"
 
@@ -61,13 +72,47 @@ def is_safe_url(url: str) -> tuple[bool, str]:
     except ValueError:
         pass
 
+    try:
+        addrs = await asyncio.to_thread(socket.getaddrinfo, host, 80, family=socket.AF_INET)
+        for addr in addrs:
+            ip_str = addr[4][0]
+            resolved = ipaddress.ip_address(ip_str)
+            for block in _PRIVATE_NETWORKS:
+                if resolved in block:
+                    return False, f"URL resolves to private address: {ip_str}"
+    except Exception:
+        pass
+
     return True, ""
+
+
+async def get_shared_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None:
+        async with _shared_client_lock:
+            if _shared_client is None:
+                _shared_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(30.0, connect=10.0),
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+                )
+    return _shared_client
+
+
+async def safe_urljoin(base: str, url: str) -> str:
+    if _FORBIDDEN_URL_SCHEMES.match(url):
+        return base
+    if url.startswith(("http://", "https://")):
+        safe, _ = await is_safe_url(url)
+        return url if safe else base
+    return urljoin(base, url)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: Any):
         super().__init__(app)
         self._requests: dict[str, list[float]] = defaultdict(list)
+        self._lock = asyncio.Lock()
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         settings = get_settings()
@@ -79,19 +124,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         window = settings.rate_limit_window_seconds
         window_start = now - window
 
-        ip_requests = self._requests[client_ip]
-        ip_requests[:] = [t for t in ip_requests if t > window_start]
+        async with self._lock:
+            ip_requests = self._requests[client_ip]
+            ip_requests[:] = [t for t in ip_requests if t > window_start]
 
-        if len(ip_requests) >= settings.rate_limit_requests:
-            return Response(
-                status_code=429,
-                content='{"detail":"Rate limit exceeded. Try again later."}',
-                media_type="application/json",
-                headers={"Retry-After": str(int(window))},
-            )
+            if len(ip_requests) >= settings.rate_limit_requests:
+                return Response(
+                    status_code=429,
+                    content='{"detail":"Rate limit exceeded. Try again later."}',
+                    media_type="application/json",
+                    headers={"Retry-After": str(int(window))},
+                )
 
-        ip_requests.append(now)
-        return await call_next(request)
+            ip_requests.append(now)
+            return await call_next(request)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):

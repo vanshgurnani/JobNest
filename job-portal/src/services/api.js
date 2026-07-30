@@ -20,11 +20,13 @@ async function request(url, options = {}) {
   return res.json();
 }
 
-export async function fetchJobs({ company, keyword, location, page = 1, limit = 20 } = {}) {
+export async function fetchJobs({ company, keyword, location, employmentType, experience, page = 1, limit = 20 } = {}) {
   const params = new URLSearchParams();
   if (company) params.set('company', company);
   if (keyword) params.set('keyword', keyword);
   if (location) params.set('location', location);
+  if (employmentType) params.set('employment_type', employmentType);
+  if (experience) params.set('experience', experience);
   params.set('page', String(page));
   params.set('limit', String(limit));
 

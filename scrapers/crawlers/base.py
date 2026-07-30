@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from typing import Any
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,14 @@ def _looks_like_job_title(text: str, href: str) -> bool:
     if re.search(r'locale\s*=', href_lower) or re.search(r'language\s*=', href_lower):
         return False
 
+    job_path_patterns = [
+        "/job/", "/jobs/", "/position/", "/requisition/",
+        "/opening/", "/careers/job", "/careers/position",
+        "/detail/",
+    ]
+    if any(pattern in href_lower for pattern in job_path_patterns):
+        return True
+
     keywords = [
         "engineer", "developer", "program", "analyst", "scientist",
         "intern", "manager", "designer", "product", "support",
@@ -41,13 +49,11 @@ def _looks_like_job_title(text: str, href: str) -> bool:
         "associate", "director", "architect", "vp", "lead",
     ]
     if any(keyword in text_lower for keyword in keywords):
-        return True
-
-    job_path_patterns = [
-        "/job/", "/jobs/", "/position/", "/requisition/",
-        "/opening/", "/careers/job", "/careers/position",
-    ]
-    if any(pattern in href_lower for pattern in job_path_patterns):
+        word_count = len(text.split())
+        if word_count >= 3:
+            return True
+        if word_count < 3 and not any(p in href_lower for p in job_path_patterns):
+            return False
         return True
 
     return False
@@ -158,8 +164,6 @@ async def request_json_with_retries(
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
             await asyncio.sleep(min(2**attempt, 4))
-            if attempt < max_retries - 1:
-                await asyncio.sleep(min(2**attempt, 4))
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -222,8 +226,6 @@ async def _request_json_with_client(
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
             await asyncio.sleep(min(2**attempt, 4))
-            if attempt < max_retries - 1:
-                await asyncio.sleep(min(2**attempt, 4))
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -605,9 +607,33 @@ def _find_value(mapping: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+_LOCATION_VALUE_RE = re.compile(
+    r"^(?:Multiple\s+Cities|Remote|Anywhere|Various|Worldwide|Global|TBD)$"
+    r"|^.+(?:,\s*[A-Z]{2,}(?:\s*[A-Z]+)?)$",
+    re.IGNORECASE,
+)
+
+def _flexible_key_search(raw_job: dict[str, Any], *patterns: str) -> str | None:
+    for key, val in raw_job.items():
+        if isinstance(val, str) and val.strip():
+            for pat in patterns:
+                if pat in key.lower():
+                    return val.strip()
+    return None
+
+def _value_location_search(raw_job: dict[str, Any]) -> str | None:
+    for val in raw_job.values():
+        if isinstance(val, str) and val.strip() and _LOCATION_VALUE_RE.match(val.strip()):
+            return val.strip()
+    return None
+
 def normalize_job_payload(raw_job: dict[str, Any], company: str, source: str) -> dict[str, Any]:
     title = _coerce_string(_find_value(raw_job, "title", "job_title", "jobTitle", "name", "role", "jobName"))
-    location = _coerce_string(_find_value(raw_job, "location", "job_location", "jobLocation", "city", "workLocation"))
+    location = _coerce_string(_find_value(raw_job, "location", "location_string", "job_location", "jobLocation", "city", "workLocation"))
+    if not location:
+        location = _coerce_string(_flexible_key_search(raw_job, "location", "city", "country"))
+    if not location:
+        location = _coerce_string(_value_location_search(raw_job))
     description = _coerce_string(_find_value(raw_job, "description", "summary", "snippet", "content", "details"))
     requirements = _coerce_string(_find_value(raw_job, "requirements", "requirement"))
     if description and requirements:
@@ -616,9 +642,13 @@ def normalize_job_payload(raw_job: dict[str, Any], company: str, source: str) ->
         description = requirements
 
     job_id = _coerce_string(_find_value(raw_job, "job_id", "jobId", "id", "jobNumber", "positionId"))
-    apply_url = _coerce_string(_find_value(raw_job, "apply_url", "applyUrl", "apply_link", "applyLink", "url", "link"))
-    employment_type = _coerce_string(_find_value(raw_job, "employment_type", "employmentType", "type", "workType"))
+    apply_url = _coerce_string(_find_value(raw_job, "apply_url", "applyUrl", "apply_link", "applyLink", "url", "link", "absolute_url"))
+    employment_type = _coerce_string(_find_value(raw_job, "employment_type", "employmentType", "type", "workType", "time_type"))
+    if not employment_type:
+        employment_type = _coerce_string(_flexible_key_search(raw_job, "employment", "work_type", "time_type"))
     experience = _coerce_string(_find_value(raw_job, "experience", "experience_level", "experienceLevel", "level"))
+    if not experience:
+        experience = _coerce_string(_flexible_key_search(raw_job, "experience", "seniority", "level"))
     team = _coerce_string(_find_value(raw_job, "team", "business_area", "businessArea", "department", "category"))
     if team and description:
         description = f"{description}\n\nTeam: {team}" if team not in description else description
@@ -656,6 +686,7 @@ def collect_job_candidates(payload: Any) -> list[dict[str, Any]]:
 def extract_jobs_from_html(html: str, *, company: str, base_url: str, location_hint: str = "") -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     seen: set[str] = set()
+    base_domain = urlparse(base_url).netloc.lower()
     for anchor in _extract_anchor_links(html):
         href = anchor["href"]
         text = anchor["text"]
@@ -664,6 +695,9 @@ def extract_jobs_from_html(html: str, *, company: str, base_url: str, location_h
         if not _looks_like_job_title(text, href):
             continue
         full_url = urljoin(base_url, href)
+        link_domain = urlparse(full_url).netloc.lower()
+        if link_domain and link_domain != base_domain:
+            continue
         title = text[:120].rstrip()
         normalized_title = title.lower()
         if normalized_title in seen:
