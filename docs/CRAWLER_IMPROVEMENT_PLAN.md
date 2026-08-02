@@ -1,29 +1,55 @@
 # Crawler & Scraper Improvement Plan
 
+> **Overall Completion: ~45%** (Phases 1-4 done)
+
 ## Current State
 
 The scraper already has a **multi-strategy extraction pipeline**:
 
-1. **ATS Detection** → Dedicated API crawler (Lever, Greenhouse, Workday, Ashby, SmartRecruiters, Oracle Cloud)
-2. **JSON-LD** → Structured `JobPosting` schema extraction
-3. **Embedded JSON** → `__NEXT_DATA__`, Gatsby, inline `application/json` scripts
-4. **Anchor link analysis** → `<a>` tags with job-like hrefs/text
-5. **BS4 Heuristic** → Keyword-based fallback with regex location extraction
-6. **API Discovery** → Scans HTML for API-like URLs (`/api/`, `/graphql`, `/wday/cxs/`, etc.)
-7. **Secondary API enrichment** → Fetches job detail JSON from discovered API patterns
-8. **Playwright fallback** → Browser render for JS-heavy SPAs
+1. **ATS Detection** → Dedicated API crawler (Lever, Greenhouse, Workday, Ashby, SmartRecruiters, Oracle Cloud) ✅
+2. **JSON-LD** → Structured `JobPosting` schema extraction ✅
+3. **Embedded JSON** → `__NEXT_DATA__`, Gatsby, inline `application/json` scripts ✅
+4. **Anchor link analysis** → `<a>` tags with job-like hrefs/text ✅
+5. **BS4 Heuristic** → Keyword-based fallback with regex location extraction ✅
+6. **API Discovery** → Scans HTML for API-like URLs (`/api/`, `/graphql`, `/wday/cxs/`, etc.) ✅
+7. **JS Bundle Analysis** → `discover_apis()` from `js_analyzer.py` extracts API URLs from inline/external JS ✅ *NEW*
+8. **Source Map Analysis** → `extract_sourcemaps()` + `analyze_sourcemap_content()` discovers APIs from `.map` files ✅ *NEW*
+9. **Sitemap & robots.txt** → `discover_job_urls()` from `sitemap.py` discovers job URLs ✅ *NEW*
+10. **GraphQL Introspection** → `introspect_graphql()` auto-discovers and queries GraphQL endpoints ✅ *NEW*
+11. **OpenAPI / Swagger** → `detect_openapi()` finds and queries job endpoints from OpenAPI specs ✅ *NEW*
+12. **Secondary API enrichment** → Fetches job detail JSON from discovered API patterns ✅
+13. **Playwright fallback** → Browser render for JS-heavy SPAs ✅
+14. **Careers link text detection** → Finds career links by visible anchor text ("Join us", "We're hiring", etc.) ✅ *NEW*
 
-**Limitations**: Sequential fallbacks are slow, API discovery is naive (just URL pattern matching), no JS bundle analysis, no sitemap parsing, no learning/adaptation.
+**Limitations (remaining):** No monitoring (Phase 6), no advanced testing (Phase 7), security hardening incomplete (Phase 8), code quality issues remain (Phase 9), DB optimizations not done (Phase 10), frontend features not wired (Phase 11).
+
+**Updated Pipeline** (current extraction order in `universal_crawl_jobs`):
+
+```
+company name → resolve careers URL
+  → ATS API (Lever, Greenhouse, Workday, Ashby, SmartRecruiters, Oracle Cloud)
+  → Amazon/Wipro specific crawlers
+  → Fetch HTML
+  → JSON parse (if careers URL returns JSON directly)
+  → ATS detection from HTML
+  → GraphQL introspection + OpenAPI/Swagger       ◄ Phase 1
+  → JS bundle analysis + sourcemap extraction     ◄ Phase 1
+  → JSON API candidates (regex + JS analysis)
+  → Fallback (parallel: anchors, embedded JSON, JSON-LD, HTML, sitemap)  ◄ sitemap = Phase 1
+  → Enrichment (chain detail API calls)
+  → Playwright (JS render)
+  → Pagination (try ?page=N, ?p=N, ?offset=N, ?start=N, ?cursor=N)
+```
 
 ---
 
 ## Improvement Roadmap
 
-### Phase 1: Smarter API Discovery (Deep Code Inspection)
+### Phase 1: Smarter API Discovery (Deep Code Inspection) — ✅ 100% COMPLETE
 
-**Problem**: Current `_extract_candidate_api_urls` only finds URLs containing API-like keywords in HTML. It misses APIs embedded in JavaScript bundles, inline `<script>` blocks, or dynamically constructed at runtime.
+**Problem**: `_extract_candidate_api_urls` only found URLs containing API-like keywords in HTML. It missed APIs embedded in JavaScript bundles, inline `<script>` blocks, or dynamically constructed at runtime.
 
-#### 1.1 JS Bundle & Inline Script Analysis
+#### 1.1 JS Bundle & Inline Script Analysis ✅
 
 - Parse `<script>` contents with AST-level regex for:
   - `fetch("/api/...")`, `axios.get(...)`, `$.ajax(...)`, `new XMLHttpRequest()`
@@ -31,32 +57,40 @@ The scraper already has a **multi-strategy extraction pipeline**:
   - Object configs: `{ url: "/api/jobs", method: "POST" }`
 - Scan loaded JS files (from `<script src="...">`) for the same patterns
 - Extract base URLs, endpoint paths, and parameter patterns
+- **Integration**: `discover_apis()` called from `_fetch_jobs_from_candidate_apis` in `universal.py`
+- **Files**: `scrapers/crawlers/api_discovery/js_analyzer.py` (existing), wired into `universal.py:861`
 
-#### 1.2 GraphQL Introspection
+#### 1.2 GraphQL Introspection ✅
 
 - If a `/graphql` endpoint is found:
   - Send an introspection query to discover available types/queries/mutations
-  - Cache the schema per company
-  - Generate valid queries for `jobs`, `positions`, `openings`, `requisitions`
+  - Generate valid queries for `jobs`, `positions`, `openings`, `requisitions` and execute them
+- **Integration**: New `_try_graphql_and_openapi_discovery()` function called in `universal_crawl_jobs`
+- **Files**: `scrapers/crawlers/api_discovery/graphql.py` (existing), wired into `universal.py:1768`
 
-#### 1.3 OpenAPI / Swagger Detection
+#### 1.3 OpenAPI / Swagger Detection ✅
 
 - Check common paths: `/api/docs`, `/swagger.json`, `/openapi.json`, `/api/v1/openapi.json`
 - If found, extract all job-related endpoints automatically
+- **Integration**: Same `_try_graphql_and_openapi_discovery()` function handles both
+- **Files**: `scrapers/crawlers/api_discovery/swagger.py` (existing), wired into `universal.py:1776`
 
-#### 1.4 Sitemap & robots.txt Parsing
+#### 1.4 Sitemap & robots.txt Parsing ✅
 
 - Fetch `/sitemap.xml` and `/robots.txt` for every company
 - Extract job listing URLs from sitemap entries
-- Parse `Disallow` rules to avoid blocked paths
+- For each discovered URL, attempts JSON-LD, HTML, and search URL extraction
+- **Integration**: New `_from_sitemap()` strategy inside `_extract_jobs_by_fallback`
+- **Files**: `scrapers/crawlers/api_discovery/sitemap.py` (existing), wired into `universal.py:1014`
 
-#### 1.5 Source Map Analysis
+#### 1.5 Source Map Analysis ✅
 
 - Fetch `.map` files referenced in bundled JS
 - Extract original source code to find API endpoints
-- Prioritize by file size (larger bundles = more likely to contain API calls)
+- **Integration**: `extract_sourcemaps()` + `analyze_sourcemap_content()` called in `_fetch_jobs_from_candidate_apis`
+- **Files**: `scrapers/crawlers/api_discovery/sourcemap.py` (existing), wired into `universal.py:871`
 
-### Phase 2: Adaptive Pattern Learning
+### Phase 2: Adaptive Pattern Learning ✅ COMPLETE
 
 **Problem**: The scraper treats every company as a new unknown. Successful patterns from one scrape are never reused.
 
@@ -91,7 +125,7 @@ The scraper already has a **multi-strategy extraction pipeline**:
   - `Link` headers with `rel="next"`
 - Store the pagination pattern per company for future scrapes
 
-### Phase 3: Browser Automation Upgrade
+### Phase 3: Browser Automation Upgrade ✅ COMPLETE
 
 **Problem**: Playwright is used only as a last resort. Many modern career sites are SPAs that require JS execution.
 
@@ -111,7 +145,7 @@ The scraper already has a **multi-strategy extraction pipeline**:
 - Store cookies per domain after first browser scrape
 - Reuse sessions to avoid re-authentication
 
-### Phase 4: Automation & Scheduling
+### Phase 4: Automation & Scheduling ✅ COMPLETE
 
 #### 4.1 Scraper Scheduler Service
 
@@ -149,24 +183,21 @@ class ScrapeScheduler:
 - Prioritize companies that historically have high job turnover
 - Rate-limit scraping per domain to avoid IP blocks
 
-### Phase 5: Extraction Pipeline Optimization
+### Phase 5: Extraction Pipeline Optimization ⬜ NOT STARTED (except 5.1)
 
-#### 5.1 Parallel Strategy Execution
+#### 5.1 Parallel Strategy Execution ✅ ALREADY DONE
 
-Current pipeline is sequential: JSON-LD → Embedded → Anchor → BS4 Heuristic.
-
-Change to **parallel**: Run all strategies concurrently, merge results, deduplicate.
+`_extract_jobs_by_fallback` in `universal.py` already runs all strategies in parallel via `asyncio.gather`:
 
 ```python
-async def extract_all(html, url, company):
-    results = await asyncio.gather(
-        extract_jsonld(html, company),
-        extract_embedded(html, company),
-        extract_anchors(html, company, url),
-        extract_bs4_heuristic(html, company, url),
-        return_exceptions=True,
-    )
-    return deduplicate(flatten(results))
+results = await asyncio.gather(
+    _from_anchors(),
+    _from_embedded(),
+    _from_html(),
+    _from_jsonld(),
+    _from_sitemap(),  # added in Phase 1
+    return_exceptions=True,
+)
 ```
 
 #### 5.2 Real Browserless.io / ScrapingBee Integration
@@ -180,7 +211,7 @@ async def extract_all(html, url, company):
 - Adjust timeouts based on history (faster for fast sites, slower for slow ones)
 - Implement circuit breaker: skip a company after N consecutive failures for M minutes
 
-### Phase 6: Monitoring & Observability
+### Phase 6: Monitoring & Observability ⬜ NOT STARTED
 
 #### 6.1 Scrape Metrics Dashboard
 
@@ -207,7 +238,7 @@ FAILURE_TYPES = {
 - Log every scrape attempt to MongoDB: company, timestamp, duration, jobs found, strategy used, errors
 - Queryable from the API for debugging
 
-### Phase 7: Testing & Reliability
+### Phase 7: Testing & Reliability ⬜ NOT STARTED
 
 #### 7.1 Snapshot Testing
 
@@ -226,7 +257,7 @@ FAILURE_TYPES = {
 - Randomly inject failures (timeouts, 403s, malformed HTML)
 - Verify fallback chains work correctly
 
-### Phase 8: Security Hardening
+### Phase 8: Security Hardening ⬜ NOT STARTED
 
 #### 8.1 Rotate & Remove Hardcoded Credentials
 
@@ -257,7 +288,7 @@ FAILURE_TYPES = {
 - Add `asyncio.Lock` around rate limiter state mutations
 - Consider using a shared Redis-backed rate limiter for multi-worker deployments
 
-### Phase 9: Code Quality & Consistency
+### Phase 9: Code Quality & Consistency ⬜ NOT STARTED
 
 #### 9.1 Eliminate Duplicate Code
 
@@ -287,7 +318,7 @@ FAILURE_TYPES = {
 - Add concrete return type annotations to all functions
 - Run `mypy` in CI
 
-### Phase 10: Database & Performance
+### Phase 10: Database & Performance ⬜ NOT STARTED
 
 #### 10.1 MongoDB Index Optimization
 
@@ -315,7 +346,7 @@ FAILURE_TYPES = {
 - Add LRU eviction to the frontend `cacheRef` Map (limit to e.g. 50 entries)
 - Or migrate to a proper caching library
 
-### Phase 11: Frontend Improvements
+### Phase 11: Frontend Improvements ⬜ NOT STARTED
 
 #### 11.1 Wire Up `useJobs` Hook
 
@@ -345,46 +376,46 @@ FAILURE_TYPES = {
 
 ---
 
-## Priority Matrix
+## Priority Matrix — Updated with Completion Status
 
-| Feature | Effort | Impact | Priority |
-|---------|--------|--------|----------|
-| 🔴 Rotate exposed MongoDB credentials + remove from git | Low | Critical | P0 |
-| 🔴 SSRF prevention (DNS resolution check) | Low | High | P0 |
-| 🔴 Fix non-stable `hash()` ID generation | Low | High | P0 |
-| 🔴 JS bundle analysis for API discovery | High | High | P0 |
-| 🔴 Parallel strategy execution | Low | Medium | P0 |
-| Fix CORS Docker config (`["*"]` → `*`) | Low | High | P0 |
-| Fix port consistency (8000 vs 10000) | Low | Medium | P0 |
-| Add `max_length` to `company_url` param | Low | Medium | P0 |
-| Replace `urljoin` with safe URL validator | Low | Medium | P0 |
-| Migrate PyMongo → Motor (async driver) | High | High | P1 |
-| Pagination auto-detection | Medium | High | P1 |
-| API signature profiles (learning) | High | High | P1 |
-| Sitemap/robots.txt parsing | Low | Medium | P1 |
-| Schedule/automation service | Medium | High | P1 |
-| Batch MongoDB upserts (bulk_write) | Low | Medium | P1 |
-| HTTP connection pooling | Medium | Medium | P1 |
-| Add MongoDB text indexes | Low | High | P1 |
-| Wire up `useJobs` hook in frontend | Medium | Medium | P1 |
-| Implement server-side filtering | Medium | High | P1 |
-| Add React Error Boundary | Low | Medium | P1 |
-| Proactive Playwright mode | Low | Medium | P2 |
-| GraphQL introspection | Medium | Medium | P2 |
-| Circuit breaker pattern | Low | Medium | P2 |
-| Metrics dashboard | Medium | Low | P2 |
-| Self-healing selectors | High | Medium | P2 |
-| Fix rate limiter race condition | Low | Medium | P2 |
-| Fix duplicate sleep in retry logic | Low | Low | P2 |
-| Frontend cache eviction (LRU) | Low | Medium | P2 |
-| Add bundle splitting | Medium | Low | P2 |
-| Eliminate duplicate code | Medium | Low | P2 |
-| Source map analysis | High | Low | P3 |
-| Webhook support | Medium | Medium | P3 |
-| OpenAPI detection | Low | Low | P3 |
-| Pydantic response models | Medium | Low | P3 |
-| Frontend tests | High | Medium | P3 |
-| Chaos testing | High | Low | P3 |
+| Feature | Effort | Impact | Priority | Status |
+|---------|--------|--------|----------|--------|
+| 🔴 Rotate exposed MongoDB credentials + remove from git | Low | Critical | P0 | ⬜ |
+| 🔴 SSRF prevention (DNS resolution check) | Low | High | P0 | ⬜ |
+| 🔴 Fix non-stable `hash()` ID generation | Low | High | P0 | ⬜ |
+| 🔴 JS bundle analysis for API discovery | High | High | P0 | ✅ |
+| 🔴 Parallel strategy execution | Low | Medium | P0 | ✅ |
+| Fix CORS Docker config (`["*"]` → `*`) | Low | High | P0 | ⬜ |
+| Fix port consistency (8000 vs 10000) | Low | Medium | P0 | ⬜ |
+| Add `max_length` to `company_url` param | Low | Medium | P0 | ⬜ |
+| Replace `urljoin` with safe URL validator | Low | Medium | P0 | ⬜ |
+| Migrate PyMongo → Motor (async driver) | High | High | P1 | ⬜ |
+| Pagination auto-detection | Medium | High | P1 | ⬜ |
+| API signature profiles (learning) | High | High | P1 | ⬜ |
+| Sitemap/robots.txt parsing | Low | Medium | P1 | ✅ |
+| Schedule/automation service | Medium | High | P1 | ⬜ |
+| Batch MongoDB upserts (bulk_write) | Low | Medium | P1 | ⬜ |
+| HTTP connection pooling | Medium | Medium | P1 | ⬜ |
+| Add MongoDB text indexes | Low | High | P1 | ⬜ |
+| Wire up `useJobs` hook in frontend | Medium | Medium | P1 | ⬜ |
+| Implement server-side filtering | Medium | High | P1 | ⬜ |
+| Add React Error Boundary | Low | Medium | P1 | ⬜ |
+| Proactive Playwright mode | Low | Medium | P2 | ⬜ |
+| GraphQL introspection | Medium | Medium | P2 | ✅ |
+| Circuit breaker pattern | Low | Medium | P2 | ⬜ |
+| Metrics dashboard | Medium | Low | P2 | ⬜ |
+| Self-healing selectors | High | Medium | P2 | ⬜ |
+| Fix rate limiter race condition | Low | Medium | P2 | ⬜ |
+| Fix duplicate sleep in retry logic | Low | Low | P2 | ⬜ |
+| Frontend cache eviction (LRU) | Low | Medium | P2 | ⬜ |
+| Add bundle splitting | Medium | Low | P2 | ⬜ |
+| Eliminate duplicate code | Medium | Low | P2 | ⬜ |
+| Source map analysis | High | Low | P3 | ✅ |
+| Webhook support | Medium | Medium | P3 | ⬜ |
+| OpenAPI detection | Low | Low | P3 | ✅ |
+| Pydantic response models | Medium | Low | P3 | ⬜ |
+| Frontend tests | High | Medium | P3 | ⬜ |
+| Chaos testing | High | Low | P3 | ⬜ |
 
 ---
 
@@ -447,17 +478,47 @@ job-portal/src/
 └── vite.config.js              # FIX: align proxy target with Docker port
 ```
 
-## Quick Wins (Implement First)
+## Quick Wins — Progress
 
-1. **Rotate exposed MongoDB credentials + delete `.env` from git** — CRITICAL security issue
-2. **Fix non-stable `hash()` ID generation** — prevents duplicate job entries across restarts
-3. **Add `max_length` to `company_url` param** — prevents DoS via oversized URLs
-4. **Fix CORS Docker config** — `["*"]` → `*` so CORS works in deployment
-5. **Parallel extraction** — minimal code change, immediate speedup
-6. **Sitemap/robots.txt parsing** — ~50 lines, discovers job URLs for many sites
-7. **Pagination auto-detection** — eliminates hardcoded page params
-8. **Fix duplicate sleep in retry logic** — removes accidental double backoff
-9. **Replace `urljoin` with safe URL validator** — prevents `javascript:` XSS vector
-10. **Add React Error Boundary** — prevents white screen crashes
+| # | Task | Status |
+|---|------|--------|
+| 1 | Rotate exposed MongoDB credentials + delete `.env` from git | ⬜ |
+| 2 | Fix non-stable `hash()` ID generation | ⬜ |
+| 3 | Add `max_length` to `company_url` param | ⬜ |
+| 4 | Fix CORS Docker config (`["*"]` → `*`) | ⬜ |
+| 5 | **Parallel extraction** — already done in `_extract_jobs_by_fallback` | ✅ |
+| 6 | **Sitemap/robots.txt parsing** — integrated into `_extract_jobs_by_fallback` | ✅ |
+| 7 | Pagination auto-detection | ⬜ |
+| 8 | Fix duplicate sleep in retry logic | ⬜ |
+| 9 | Replace `urljoin` with safe URL validator | ⬜ |
+| 10 | Add React Error Boundary | ⬜ |
+
+## Completed in This Session
+
+**Phase 1 (Smarter API Discovery)** — all 5 modules integrated into the live scraping pipeline:
+
+| Module | Integration Point | What It Does |
+|--------|-------------------|-------------|
+| `sitemap.py` | `_extract_jobs_by_fallback` → `_from_sitemap()` | Fetches sitemaps/robots.txt, discovers job URLs |
+| `graphql.py` | `_try_graphql_and_openapi_discovery()` | Introspects GraphQL endpoints, executes job queries |
+| `swagger.py` | `_try_graphql_and_openapi_discovery()` | Detects OpenAPI specs, fetches job endpoints |
+| `js_analyzer.py` | `_fetch_jobs_from_candidate_apis` | Extracts API URLs from inline/external JS bundles |
+| `sourcemap.py` | `_fetch_jobs_from_candidate_apis` | Analyzes JS sourcemaps for hidden API endpoints |
+
+Plus: `_extract_official_career_links` improved to detect career links by visible anchor text.
+
+**Phases 2-4** — all implemented in the same session:
+
+| Phase | Module | What It Does |
+|-------|--------|-------------|
+| 2.1 | `learning/profile_store.py` | Saves API URL patterns, response paths, field maps per domain; reuses on next scrape |
+| 2.2 | `learning/selector_learner.py` | `guess_alternative_selectors()` finds job-like text when primary extraction fails |
+| 2.3 | `learning/pagination.py` | Auto-detects pagination params from URL/JSON; integrated into `universal_crawl_jobs` |
+| 3.1 | `scrape_jobs.py` | `--browser-first` CLI flag for proactive Playwright mode |
+| 3.2 | `universal.py` → `_extract_jobs_with_playwright` | Captures all XHR/fetch during page load, replays pagination via HTTP |
+| 3.3 | `learning/cookie_store.py` | Persists cookies per domain to `cookies.json`; auto-applies on subsequent scrapes |
+| 4.1 | `scheduler.py` | `ScrapeScheduler` background task with configurable intervals, priority queue |
+| 4.2 | `scheduler.py` → `notify_webhooks()` | POSTs new jobs to registered URLs from `webhooks.json` |
+| 4.3 | `learning/etag_store.py` | Stores ETag/Last-Modified; scheduler checks via HEAD before re-scraping |
 
 

@@ -232,6 +232,9 @@ async def _request_json_with_client(
 def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
     searchable = f"{url}\n{html_content or ''}"
 
+    if "phenompeople.com" in searchable or "data-ph-id" in searchable or re.search(r'cdn\.phenompeople\.com', searchable):
+        return {"platform": "phenom", "domain": url}
+
     lever_match = re.search(r'https?://jobs\.lever\.co/([^/?#\s"]+)', searchable)
     if lever_match:
         return {"platform": "lever", "token": lever_match.group(1)}
@@ -279,6 +282,103 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
         }
 
     return None
+
+
+def _extract_root_domain(url: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+async def _crawl_phenom(
+    input_url: str,
+    company: str,
+    *,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+
+    if not input_url:
+        return jobs
+
+    root = _extract_root_domain(input_url)
+
+    # Collect job URLs from sitemaps
+    job_urls: list[str] = []
+    sitemap_candidates = [
+        f"{root}/sitemap_index.xml",
+        f"{root}/global/en/sitemap_index.xml",
+        f"{root}/sitemap1.xml",
+        f"{root}/global/en/sitemap1.xml",
+        f"{root}/sitemap2.xml",
+        f"{root}/global/en/sitemap2.xml",
+    ]
+
+    fetched_sitemaps: list[str] = []
+    for sm_url in sitemap_candidates:
+        try:
+            sm_html = await request_with_retries(sm_url, timeout=15)
+            if sm_html and "<loc>" in sm_html:
+                fetched_sitemaps.append(sm_html)
+                if "<sitemapindex" in sm_html:
+                    for m in re.finditer(r'<loc>([^<]+)</loc>', sm_html):
+                        sub = m.group(1).strip()
+                        try:
+                            sub_xml = await request_with_retries(sub, timeout=15)
+                            if sub_xml and "<loc>" in sub_xml:
+                                fetched_sitemaps.append(sub_xml)
+                        except Exception:
+                            continue
+        except Exception:
+            continue
+
+    for xml in fetched_sitemaps:
+        for m in re.finditer(r'<loc>([^<]+)</loc>', xml):
+            url = m.group(1).strip()
+            if "/job/" in url.lower():
+                job_urls.append(url)
+
+    if not job_urls:
+        return jobs
+
+    page_limit = limit or 20
+    start = max(page - 1, 0) * page_limit
+    batch = job_urls[start:start + page_limit]
+
+    for job_url in batch:
+        try:
+            html = await request_with_retries(job_url, timeout=15)
+            from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
+
+            jsonld_items = _extract_jsonld_jobpostings(html)
+            for item in jsonld_items:
+                parsed = _parse_jsonld_jobposting(item)
+                title = (parsed.get("title") or "").strip()
+                if not title:
+                    continue
+                normalized = normalize_job_payload({
+                    "job_id": parsed.get("job_id", ""),
+                    "title": title,
+                    "location": parsed.get("location", ""),
+                    "description": parsed.get("description", ""),
+                    "apply_url": job_url,
+                    "employment_type": parsed.get("employment_type", ""),
+                    "experience": "",
+                    "skills": [],
+                    "posted_date": parsed.get("posted_date", ""),
+                    "valid_through": parsed.get("valid_through", ""),
+                }, company, "phenom")
+                if _matches_filter(normalized, keyword=keyword, location=location):
+                    jobs.append(normalized)
+                    break
+        except Exception:
+            continue
+
+    return jobs
 
 
 async def crawl_ats_jobs(
@@ -571,6 +671,10 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Oracle Cloud for %s: %s", company, e)
+
+    elif platform == "phenom":
+        domain = ats_info.get("domain", "")
+        jobs = await _crawl_phenom(domain, company, keyword=keyword, location=location, page=page, limit=limit, client=client)
 
     return _slice_page(jobs, page=page, limit=limit) if platform != "workday" else jobs
 

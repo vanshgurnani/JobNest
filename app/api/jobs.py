@@ -209,52 +209,52 @@ async def run_scrape(request: Request) -> dict:
     pages = int(body.get("pages", 2))
     page_size = int(body.get("page_size", 20))
     delay = float(body.get("delay_seconds", 0.5))
-    mode = (body.get("mode") or "local").strip().lower()
-    use_playwright = bool(body.get("playwright", False))
 
     mod = await _get_scraper()
-    companies = [c.strip().lower() for c in companies_str.split(",") if c.strip()] if companies_str else mod.supported_companies()
+    explicit_companies = [c.strip().lower() for c in companies_str.split(",") if c.strip()] if companies_str else []
     urls = [u.strip() for u in urls_str.split(",") if u.strip()] if urls_str else []
-    if not companies and not urls:
+    if not explicit_companies and not urls:
         companies = mod.supported_companies()
+    else:
+        companies = explicit_companies
 
     all_results: list[dict[str, Any]] = []
 
-    if mode == "db":
-        try:
-            from app.db.mongo import connect_mongo
-            await connect_mongo()
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"MongoDB connection failed: {exc}")
+    COMPANY_TIMEOUT = 240  # seconds per company
 
     async def _scrape_one(target: str, *, is_url: bool = False) -> dict[str, Any]:
         start = time.monotonic()
         metrics.record_attempt(target)
         try:
-            jobs = await mod._scrape_company(
-                None if is_url else target,
-                company_url=target if is_url else None,
-                keyword=keyword,
-                location=location,
-                pages=pages,
-                page_size=page_size,
-                delay_seconds=delay,
-                use_playwright=use_playwright,
+            jobs = await asyncio.wait_for(
+                mod._scrape_company(
+                    None if is_url else target,
+                    company_url=target if is_url else None,
+                    keyword=keyword,
+                    location=location,
+                    pages=pages,
+                    page_size=page_size,
+                    delay_seconds=delay,
+                ),
+                timeout=COMPANY_TIMEOUT,
             )
             job_count = len(jobs)
             duration = time.monotonic() - start
             metrics.record_success(target, job_count, "scrape", duration)
             audit.record(target, duration, job_count, "scrape")
             logger.info("Scraped %s: %d jobs", target, job_count)
-            if mode == "db" and jobs:
-                from app.services.job_store import upsert_jobs
-                await upsert_jobs(jobs)
             return {"target": target, "jobs": jobs, "count": job_count}
+        except asyncio.TimeoutError:
+            duration = time.monotonic() - start
+            logger.warning("Scrape timed out for '%s' after %ds", target, duration)
+            metrics.record_failure(target)
+            audit.record(target, duration, 0, "scrape", "timeout")
+            return {"target": target, "jobs": [], "count": 0, "error": f"Timed out after {COMPANY_TIMEOUT}s"}
         except Exception as e:
             duration = time.monotonic() - start
             metrics.record_failure(target)
             audit.record(target, duration, 0, "scrape", str(e))
-            raise
+            return {"target": target, "jobs": [], "count": 0, "error": str(e)}
 
     batch = companies + urls
     if len(batch) > 1:
@@ -262,6 +262,7 @@ async def run_scrape(request: Request) -> dict:
         for r in results:
             if isinstance(r, Exception):
                 logger.error("Parallel scrape failed: %s", r)
+                all_results.append({"target": "unknown", "jobs": [], "count": 0, "error": str(r)})
             else:
                 all_results.append(r)
     else:
@@ -270,17 +271,86 @@ async def run_scrape(request: Request) -> dict:
         for url in urls:
             all_results.append(await _scrape_one(url, is_url=True))
 
-    if mode == "db":
-        try:
-            from app.db.mongo import close_mongo
-            await close_mongo()
-        except Exception:
-            pass
-
     total = sum(r["count"] for r in all_results)
     for r in all_results:
         await _notify_webhooks(r["target"], r["count"])
-    return {"results": all_results, "total": total, "mode": mode}
+    return {"results": all_results, "total": total, "mode": "local"}
+
+
+@router.post("/scrape/start")
+async def start_scrape(request: Request) -> dict:
+    body = await request.json()
+    from app.services.scrape_manager import manager
+    task_id = await manager.start(body)
+    return {"task_id": task_id}
+
+
+@router.post("/scrape/stop/{task_id}")
+async def stop_scrape(task_id: str) -> dict:
+    from app.services.scrape_manager import manager
+    ok = manager.stop(task_id)
+    return {"stopped": ok}
+
+
+@router.get("/scrape/status/{task_id}")
+async def scrape_status(task_id: str) -> dict:
+    from app.services.scrape_manager import manager
+    task = manager.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task.to_dict()
+
+
+@router.get("/scrape/events/{task_id}")
+async def scrape_events(request: Request, task_id: str):
+    from app.services.scrape_manager import manager
+    task = manager.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    async def event_stream():
+        async for event in task.events():
+            if event.get("type") == "heartbeat":
+                yield ": heartbeat\n\n"
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+            if event.get("status") in ("completed", "cancelled", "failed"):
+                break
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/push-to-db")
+async def push_to_db(request: Request) -> dict:
+    body = await request.json()
+    jobs = body.get("jobs", [])
+    if not jobs:
+        raise HTTPException(status_code=400, detail="No jobs provided")
+
+    try:
+        from app.db.mongo import connect_mongo
+        await connect_mongo()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"MongoDB connection failed: {exc}")
+
+    saved = 0
+    try:
+        from app.services.job_store import upsert_jobs
+        canonicalized = []
+        for j in jobs:
+            from app.schemas.job import canonicalize_job
+            canonicalized.append(canonicalize_job(j))
+        await upsert_jobs(canonicalized)
+        saved = len(canonicalized)
+        logger.info("Pushed %d jobs to database", saved)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save jobs: {exc}")
+    finally:
+        from app.db.mongo import close_mongo
+        await close_mongo()
+
+    return {"saved": saved}
 
 
 @router.post("/webhooks")

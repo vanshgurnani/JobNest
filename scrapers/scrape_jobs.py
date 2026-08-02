@@ -19,11 +19,9 @@ if str(ROOT) not in sys.path:
 
 from scrapers.crawlers.base import request_with_retries
 
-from app.db.mongo import close_mongo, connect_mongo
 from app.schemas.job import canonicalize_job
-from app.services.job_store import upsert_jobs
 from scrapers.crawlers.orchestrator import crawl_jobs
-from scrapers.utils import company_name_from_url, detect_ats, supported_companies
+from scrapers.utils import company_name_from_url, detect_ats, sanitize_url, supported_companies
 
 LOGGER = logging.getLogger("scrapers.scrape_jobs")
 
@@ -92,11 +90,17 @@ class GenericScraper:
             _extract_jsonld_jobpostings,
             _parse_jsonld_jobposting,
         )
-        from scrapers.crawlers.base import extract_jobs_from_html
+        from scrapers.crawlers.base import extract_jobs_from_html, _crawl_phenom
 
         company_name = self.company or _company_name_from_url(url)
         all_jobs: list[dict[str, Any]] = []
         seen_titles: set[str] = set()
+
+        # 0 — If page is a Phenom SPA (data-ph-id or phenompeople CDN), use sitemap-based approach
+        if "data-ph-id" in html or "phenompeople.com" in html:
+            phenom_jobs = await _crawl_phenom(url, company_name, keyword=keyword, location=location, page=page, limit=limit)
+            if phenom_jobs:
+                return _slice_and_filter(phenom_jobs, keyword, location, page, limit)
 
         # 1 — JSON-LD (structured data, e.g. Apple, Google, etc.)
         jsonld_items = _extract_jsonld_jobpostings(html)
@@ -521,6 +525,54 @@ def route_scraper(url: str, html: str = "") -> GenericScraper | None:
     return GenericScraper(company=company_name)
 
 
+async def _enrich_job_descriptions(
+    jobs: list[dict[str, Any]],
+    label: str,
+) -> list[dict[str, Any]]:
+    BATCH = 5
+    enriched = 0
+    for i in range(0, len(jobs), BATCH):
+        batch = jobs[i : i + BATCH]
+        results = await asyncio.gather(
+            *[_fetch_description(j) for j in batch],
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            enriched += 1
+    LOGGER.info("[ENRICH] Enriched descriptions for %d/%d jobs from '%s'", enriched, len(jobs), label)
+    return jobs
+
+
+async def _fetch_description(job: dict[str, Any]) -> dict[str, Any]:
+    url = job.get("apply_url") or job.get("url", "")
+    if not url or job.get("description", "").strip():
+        return job
+    try:
+        html = await request_with_retries(url, timeout=10.0)
+        from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
+
+        jsonld_items = _extract_jsonld_jobpostings(html)
+        for item in jsonld_items:
+            parsed = _parse_jsonld_jobposting(item)
+            if parsed.get("description"):
+                job["description"] = parsed["description"]
+                break
+        else:
+            soup = BeautifulSoup(html, "lxml")
+            meta = soup.find("meta", attrs={"name": "description"})
+            if meta and meta.get("content"):
+                job["description"] = meta["content"]
+            else:
+                og = soup.find("meta", property="og:description")
+                if og and og.get("content"):
+                    job["description"] = og["content"]
+    except Exception:
+        pass
+    return job
+
+
 async def _scrape_company(
     company: str | None,
     *,
@@ -535,6 +587,8 @@ async def _scrape_company(
 ) -> list[dict[str, Any]]:
     all_jobs: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    if company_url:
+        company_url = sanitize_url(company_url)
     label = company_url or company or "unknown"
 
     _scraper: GenericScraper | None = None
@@ -637,6 +691,9 @@ async def _scrape_company(
         if page < pages and delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
 
+    if all_jobs:
+        all_jobs = await _enrich_job_descriptions(all_jobs, label)
+
     LOGGER.info("[SCRAPE] Finished scraping target='%s'. Total jobs collected: %d", label, len(all_jobs))
     return all_jobs
 
@@ -658,7 +715,7 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     LOGGER.info("=" * 60)
-    LOGGER.info("STARTING JOB SCRAPER | Mode: %s | Generic-only: %s", args.mode.upper(), generic_only)
+    LOGGER.info("STARTING JOB SCRAPER | Generic-only: %s", generic_only)
     if companies:
         LOGGER.info("Target Companies: %s", ", ".join(companies))
     if urls:
@@ -666,76 +723,57 @@ async def _run(args: argparse.Namespace) -> None:
     LOGGER.info("Pages per Target: %d | Limit per Page: %d", args.pages, args.page_size)
     LOGGER.info("=" * 60)
 
-    if args.mode == "db":
-        LOGGER.info("[DB MODE] Connecting to MongoDB...")
-        await asyncio.to_thread(connect_mongo)
-
     total_scraped = 0
     all_collected_jobs: list[dict[str, Any]] = []
 
-    try:
-        for company in companies:
-            LOGGER.info("[SEQUENTIAL] Processing company: %s", company)
-            jobs = await _scrape_company(
-                company,
-                keyword=args.keyword,
-                location=args.location,
-                pages=args.pages,
-                page_size=args.page_size,
-                delay_seconds=args.delay_seconds,
-            )
-            total_scraped += len(jobs)
-            all_collected_jobs.extend(jobs)
+    for company in companies:
+        LOGGER.info("[SEQUENTIAL] Processing company: %s", company)
+        jobs = await _scrape_company(
+            company,
+            keyword=args.keyword,
+            location=args.location,
+            pages=args.pages,
+            page_size=args.page_size,
+            delay_seconds=args.delay_seconds,
+            use_playwright=args.browser_first,
+        )
+        total_scraped += len(jobs)
+        all_collected_jobs.extend(jobs)
+        if args.delay_seconds > 0:
+            await asyncio.sleep(args.delay_seconds)
 
-            if args.mode == "db" and jobs:
-                await upsert_jobs(jobs)
-                LOGGER.info("[DB MODE] Successfully upserted %d jobs for '%s' into MongoDB.", len(jobs), company)
+    for url in urls:
+        LOGGER.info("[SEQUENTIAL] Processing company URL: %s", url)
+        jobs = await _scrape_company(
+            company=None,
+            company_url=url,
+            keyword=args.keyword,
+            location=args.location,
+            pages=args.pages,
+            page_size=args.page_size,
+            delay_seconds=args.delay_seconds,
+            generic_only=generic_only,
+            use_playwright=args.browser_first,
+        )
+        total_scraped += len(jobs)
+        all_collected_jobs.extend(jobs)
+        if args.delay_seconds > 0:
+            await asyncio.sleep(args.delay_seconds)
 
-            if args.delay_seconds > 0:
-                await asyncio.sleep(args.delay_seconds)
+    LOGGER.info("=" * 60)
+    LOGGER.info("SCRAPE SUMMARY")
+    LOGGER.info("Total Jobs Scraped Across All Targets: %d", total_scraped)
 
-        for url in urls:
-            LOGGER.info("[SEQUENTIAL] Processing company URL: %s", url)
-            jobs = await _scrape_company(
-                company=None,
-                company_url=url,
-                keyword=args.keyword,
-                location=args.location,
-                pages=args.pages,
-                page_size=args.page_size,
-                delay_seconds=args.delay_seconds,
-                generic_only=generic_only,
-            )
-            total_scraped += len(jobs)
-            all_collected_jobs.extend(jobs)
+    if all_collected_jobs:
+        LOGGER.info("\n--- FIRST 4 DATA POINTS PREVIEW ---\n%s\n---------------------------------", _format_jobs_preview(all_collected_jobs))
+    else:
+        LOGGER.info("No job data points were retrieved.")
 
-            if args.mode == "db" and jobs:
-                await upsert_jobs(jobs)
-                LOGGER.info("[DB MODE] Successfully upserted %d jobs for URL '%s' into MongoDB.", len(jobs), url)
-
-            if args.delay_seconds > 0:
-                await asyncio.sleep(args.delay_seconds)
-
-        LOGGER.info("=" * 60)
-        LOGGER.info("SCRAPE SUMMARY | Mode: %s", args.mode.upper())
-        LOGGER.info("Total Jobs Scraped Across All Targets: %d", total_scraped)
-
-        if all_collected_jobs:
-            LOGGER.info("\n--- FIRST 4 DATA POINTS PREVIEW ---\n%s\n---------------------------------", _format_jobs_preview(all_collected_jobs))
-        else:
-            LOGGER.info("No job data points were retrieved.")
-
-        LOGGER.info("=" * 60)
-
-    finally:
-        if args.mode == "db":
-            LOGGER.info("[DB MODE] Closing MongoDB connection...")
-            await asyncio.to_thread(close_mongo)
+    LOGGER.info("=" * 60)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sequential Playwright-free job scraper for Job Nest.")
-    parser.add_argument("--mode", choices=["local", "db"], default="local", help="Operation mode: local (dry run / preview) or db (upsert to MongoDB).")
+    parser = argparse.ArgumentParser(description="Sequential job scraper for Job Nest.")
     parser.add_argument("--companies", default="all", help="Comma-separated company slugs or 'all'.")
     parser.add_argument("--company-url", default=None, help="Comma-separated company career page URLs to scrape (bypasses company name lookup).")
     parser.add_argument("--keyword", default=None, help="Filter jobs by keyword.")
@@ -744,6 +782,7 @@ def main() -> None:
     parser.add_argument("--page-size", type=int, default=20, help="Number of items per page.")
     parser.add_argument("--delay-seconds", type=float, default=0.5, help="Delay between page/company requests in seconds (CPU protection).")
     parser.add_argument("--generic-only", action="store_true", help="Skip registered companies; scrape provided URLs with the generic fallback scraper only.")
+    parser.add_argument("--browser-first", action="store_true", help="Use Playwright immediately for known SPA-heavy sites instead of as last resort.")
 
     args = parser.parse_args()
     asyncio.run(_run(args))

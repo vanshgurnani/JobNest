@@ -60,6 +60,11 @@ async def index():
     return FileResponse(Path(__file__).resolve().parent.parent / "local-frontend.html")
 
 
+@app.get("/realtime")
+async def realtime():
+    return FileResponse(Path(__file__).resolve().parent.parent / "realtime-frontend.html")
+
+
 @app.route("/health", methods=["GET", "HEAD"])
 async def health(request: Request) -> dict[str, str] | Response:
     if request.method == "HEAD":
