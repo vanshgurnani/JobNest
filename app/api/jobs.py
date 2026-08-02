@@ -57,10 +57,13 @@ async def get_companies() -> dict:
     try:
         companies = await find_companies()
         if not companies:
-            companies = [c.title() for c in SUPPORTED_COMPANIES]
+            companies = [{"name": c.title(), "count": 0} for c in SUPPORTED_COMPANIES]
     except RuntimeError:
-        companies = [c.title() for c in SUPPORTED_COMPANIES]
-    return {"companies": companies}
+        companies = [{"name": c.title(), "count": 0} for c in SUPPORTED_COMPANIES]
+    return {
+        "companies": companies,
+        "companies_list": [c["name"] for c in companies],
+    }
 
 
 async def _cache_response(key: str, payload: dict) -> dict:
