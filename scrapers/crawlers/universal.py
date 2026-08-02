@@ -25,9 +25,11 @@ from scrapers.crawlers.base import (
     crawl_ats_jobs,
     detect_ats,
     extract_jobs_from_html,
+    _looks_like_job_title,
     normalize_job_payload,
     request_json_with_retries,
     request_with_retries,
+    shared_httpx_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,68 +93,26 @@ _STATIC_EXTENSIONS = (
     ".map",
 )
 
-_SCRAPER_DIR = Path(__file__).resolve().parent.parent
-_COMPANY_URLS_PATH = _SCRAPER_DIR / "company_urls.json"
-
 _COMPANY_ALIASES: dict[str, str] = {}
 _KNOWN_COMPANY_CAREERS_URLS: dict[str, str] = {}
 _LOADED = False
 
 
 def _ensure_company_urls_loaded() -> None:
+    """Bootstrap known company -> careers URL hints from the in-code seed directory.
+
+    Only used as a fast path; any company not listed here is still resolved
+    dynamically at runtime (slug-based candidate probing + homepage discovery).
+    """
     global _KNOWN_COMPANY_CAREERS_URLS, _COMPANY_ALIASES, _LOADED
     if _LOADED:
         return
     _LOADED = True
 
-    _KNOWN_COMPANY_CAREERS_URLS = {}
-    _COMPANY_ALIASES = {}
+    from scrapers.directory import _SEED_ALIASES, _SEED_URLS
 
-    if _COMPANY_URLS_PATH.exists():
-        try:
-            raw = json.loads(_COMPANY_URLS_PATH.read_text(encoding="utf-8"))
-            for key, val in raw.items():
-                if key.startswith("_"):
-                    if key == "_aliases" and isinstance(val, dict):
-                        for alias_k, alias_v in val.items():
-                            _COMPANY_ALIASES[alias_k.strip().lower()] = alias_v.strip().lower()
-                    continue
-                if isinstance(val, str) and val.startswith("http"):
-                    _KNOWN_COMPANY_CAREERS_URLS[key.strip().lower()] = val
-        except Exception as exc:
-            logger.warning("Failed loading %s: %s", _COMPANY_URLS_PATH, exc)
-
-    # Fallback hardcoded defaults (override JSON if missing)
-    _HARDCODED: dict[str, str] = {
-        "amazon": "https://www.amazon.jobs/en/search.json",
-        "google": "https://www.google.com/about/careers/applications/jobs/results/",
-        "wipro": "https://careers.wipro.com/viewalljobs/?locale=en_US",
-        "jpmorgan": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
-        "kpmg": "https://kpmg.wd5.myworkdayjobs.com/KPMG_External_Careers",
-        "tcs": "https://www.tcs.com/careers",
-        "infosys": "https://career.infosys.com/joblist",
-        "cognizant": "https://careers.cognizant.com/global-en/jobs/",
-        "mastercard": "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers",
-        "accenture": "https://www.accenture.com/in-en/careers/jobsearch",
-        "meta": "https://www.metacareers.com/jobs",
-        "microsoft": "https://careers.microsoft.com/us/en/search-results",
-        "zoho": "https://www.zoho.com/careers/",
-    }
-    for key, url in _HARDCODED.items():
-        if key not in _KNOWN_COMPANY_CAREERS_URLS:
-            _KNOWN_COMPANY_CAREERS_URLS[key] = url
-
-    _HARDCODED_ALIASES: dict[str, str] = {
-        "jpm": "jpmorgan",
-        "jp morgan": "jpmorgan",
-        "j.p. morgan": "jpmorgan",
-        "tca": "tcs",
-        "tata": "tcs",
-        "kpmg jp": "kpmg",
-    }
-    for alias_k, alias_v in _HARDCODED_ALIASES.items():
-        if alias_k not in _COMPANY_ALIASES:
-            _COMPANY_ALIASES[alias_k] = alias_v
+    _KNOWN_COMPANY_CAREERS_URLS = {k: v for k, v in _SEED_URLS.items() if v.startswith("http")}
+    _COMPANY_ALIASES = {k.strip().lower(): v.strip().lower() for k, v in _SEED_ALIASES.items()}
 
 
 def _clean_text(value: str | None) -> str:
@@ -246,6 +206,23 @@ async def _get_homepage_html(company_url: str, *, client: httpx.AsyncClient | No
     return company_url, html
 
 
+def _extract_page_title(html: str) -> str:
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
+    if m:
+        title = _clean_text(_strip_tags(m.group(1)))
+        if title:
+            return title
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if m:
+        title = _clean_text(_strip_tags(m.group(1)))
+        if title:
+            for sep in (" - ", " | ", " — ", " – "):
+                if sep in title:
+                    return title.split(sep)[0]
+            return title
+    return ""
+
+
 def _extract_jsonld_jobpostings(html: str) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     for m in re.finditer(
@@ -324,7 +301,12 @@ def _parse_jsonld_jobposting(job: dict[str, Any]) -> dict[str, Any]:
     apply_url = job.get("directApply")
     if isinstance(apply_url, dict):
         apply_url = apply_url.get("url")
-    if not apply_url:
+    if isinstance(apply_url, str):
+        # Some boards (e.g. Barclays) emit the literal string "False" instead of
+        # omitting the field. Treat it as absent.
+        if apply_url.strip().lower() in ("false", "none", "null", "true"):
+            apply_url = ""
+    if not apply_url or not isinstance(apply_url, str):
         apply_url = job.get("url") or job.get("applicationUrl") or ""
 
     job_id = _clean_text(job.get("identifier", {}).get("value")) if isinstance(job.get("identifier"), dict) else ""
@@ -448,6 +430,11 @@ def _job_from_search_result_url(url: str, *, company: str, base_url: str) -> dic
     if not title and not job_id:
         return None
     if not title:
+        # Only fabricate a title from the slug when the path actually looks like
+        # a job posting; otherwise this turns nav links ("/board-and-leadership/")
+        # into fake jobs.
+        if not re.search(r"(?:/jobs?|/jobdetail|/requisition|/position|/opening|/candidate-experience)/", parsed.path, re.IGNORECASE):
+            return None
         slug = parsed.path.rstrip("/").split("/")[-1]
         title = _clean_text(unquote(slug.replace("-", " ")))
     if not title or title.lower() in {"jobsearch", "search-results", "results"}:
@@ -1023,13 +1010,91 @@ async def _try_graphql_and_openapi_discovery(
     return jobs
 
 
+async def _fetch_job_from_url(
+    url: str,
+    *,
+    company: str,
+    company_base_url: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any] | None:
+    """Fetch a candidate job URL and extract a real listing (JSON-LD / embedded JSON / meta).
+
+    Returns None when the page isn't actually a job posting, so nav links never
+    masquerade as jobs.
+    """
+    try:
+        page_html = await _fetch_html(url, headers=_default_headers(), timeout=12.0, client=client)
+    except Exception:
+        return None
+    if not page_html:
+        return None
+
+    for item in _extract_jsonld_jobpostings(page_html):
+        parsed = _parse_jsonld_jobposting(item)
+        if parsed.get("title"):
+            apply_url = parsed.get("apply_url") or url
+            if not apply_url.startswith("http"):
+                apply_url = urljoin(url, apply_url)
+            if not _is_allowed_source_url(apply_url, company_base_url):
+                continue
+            return {
+                "company": company.title(),
+                "job_id": parsed.get("job_id", ""),
+                "title": parsed["title"],
+                "location": parsed.get("location", ""),
+                "description": parsed.get("description", ""),
+                "apply_url": apply_url,
+                "url": apply_url,
+                "source": "fetched-jsonld",
+                "posted_date": parsed.get("posted_date", ""),
+                "valid_through": parsed.get("valid_through", ""),
+            }
+
+    for payload in _extract_embedded_json(page_html):
+        for job in await _extract_jobs_from_json_payload(payload, company, "fetched-json"):
+            apply_url = job.get("apply_url") or ""
+            if apply_url and not apply_url.startswith("http"):
+                apply_url = urljoin(url, apply_url)
+            if apply_url and not _is_allowed_source_url(apply_url, company_base_url):
+                continue
+            job["apply_url"] = apply_url or url
+            job["url"] = apply_url or url
+            job["source"] = "fetched-json"
+            return job
+
+    title = _extract_page_title(page_html)
+    if not title or not _looks_like_job_title(title, url):
+        return None
+    if not re.search(r"(?:/job(?:s|detail)?/|/requisition/|/position/|/opening/|jobId=|requisitionId=)", url, re.IGNORECASE):
+        return None
+    return {
+        "company": company.title(),
+        "job_id": "",
+        "title": title[:160],
+        "location": "",
+        "description": f"Job listing scraped from {company}.",
+        "apply_url": url,
+        "url": url,
+        "source": "fetched-html",
+    }
+
+
 async def _extract_jobs_by_fallback(company: str, careers_url: str, company_base_url: str, html: str, *, client: httpx.AsyncClient | None = None) -> list[dict[str, Any]]:
     async def _from_anchors() -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
+        candidates: list[str] = []
         for href in _extract_anchor_urls(html):
-            candidate = _job_from_search_result_url(href, company=company, base_url=careers_url)
-            if candidate and _is_allowed_source_url(candidate["url"], company_base_url):
-                result.append(candidate)
+            full = urljoin(careers_url, href)
+            if full not in candidates and _is_allowed_source_url(full, company_base_url):
+                candidates.append(full)
+        for url in candidates[:20]:
+            fast = _job_from_search_result_url(url, company=company, base_url=careers_url)
+            if fast:
+                result.append(fast)
+                continue
+            job = await _fetch_job_from_url(url, company=company, company_base_url=company_base_url, client=client)
+            if job:
+                result.append(job)
         return result
 
     async def _from_embedded() -> list[dict[str, Any]]:
@@ -1052,6 +1117,8 @@ async def _extract_jobs_by_fallback(company: str, careers_url: str, company_base
             if not j.get("apply_url"):
                 j["apply_url"] = j.get("url", "")
             if j.get("url") and not _is_allowed_source_url(j["url"], company_base_url):
+                continue
+            if not re.search(r"(?:/job(?:s|detail)?/|/requisition/|/position/|/opening/|jobId=|requisitionId=)", j.get("url", ""), re.IGNORECASE):
                 continue
             result.append({
                 "company": j.get("company", company).title(),
@@ -1354,7 +1421,11 @@ async def _extract_jobs_with_playwright(
             from scrapers.crawlers.base import extract_jobs_from_html as extract_html
             html_jobs = extract_html(rendered_html, company=company, base_url=url)
             for j in html_jobs:
-                if j.get("title"):
+                if j.get("title") and re.search(
+                    r"(?:/job(?:s|detail)?/|/requisition/|/position/|/opening/|jobId=|requisitionId=)",
+                    j.get("url", ""),
+                    re.IGNORECASE,
+                ):
                     fallback_jobs.append(normalize_job_payload(j, company, "playwright-html"))
 
         if fallback_jobs:
@@ -1580,6 +1651,7 @@ async def universal_crawl_jobs(
     page: int = 1,
     limit: int = 20,
     use_playwright: bool = False,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -1589,13 +1661,8 @@ async def universal_crawl_jobs(
 
     if use_playwright:
         if not company_url:
-            from scrapers.utils import supported_companies
-            _urls_path = Path(__file__).resolve().parent.parent / "company_urls.json"
-            try:
-                _mapping = json.loads(_urls_path.read_text())
-                company_url = _mapping.get(company_name.lower(), "")
-            except Exception:
-                pass
+            from scrapers.directory import careers_url
+            company_url = careers_url(company_name.lower())
         target_url = company_url or f"https://{company_name.replace(' ', '')}.com/careers"
         pw_jobs = await _extract_jobs_with_playwright(
             target_url,
@@ -1706,7 +1773,8 @@ async def universal_crawl_jobs(
             return False
 
         filtered: list[dict[str, Any]] = []
-        for j in (real_jobs if real_jobs else pw_jobs):
+        candidate_pool = real_jobs if real_jobs else [j for j in pw_jobs if not _is_category_item(j)]
+        for j in candidate_pool:
             if _is_expired(j):
                 continue
             if location and not _location_matches(location, j.get("location", "")):
@@ -1721,11 +1789,12 @@ async def universal_crawl_jobs(
 
     jobs: list[dict[str, Any]] = []
 
-    async with httpx.AsyncClient(
+    async with shared_httpx_client(
         headers={"User-Agent": ua},
-        follow_redirects=True,
         timeout=30,
-    ) as client:
+    ) as _own_client:
+        client = client or _own_client
+
         company_base_url, careers_url = await _resolve_careers_page(
             company_name=company_name, company_url=company_url, client=client,
         )
@@ -1889,7 +1958,20 @@ async def universal_crawl_jobs(
             )
             if pw_jobs:
                 logger.info("Playwright found %d jobs for %s", len(pw_jobs), company_name)
-                jobs = pw_jobs
+
+                def _is_category_item(j):
+                    u = (j.get("url") or j.get("apply_url") or "").strip()
+                    if j.get("location") or j.get("job_id"):
+                        return False
+                    if not u or u == careers_url:
+                        return True
+                    path = urlparse(u).path.lower()
+                    if any(p in path for p in ("/job/", "/jobs/", "/detail/", "/position/", "/requisition/", "/opening/", "/apply/")):
+                        return False
+                    return True
+
+                jobs = [j for j in pw_jobs if not _is_category_item(j)]
+                logger.info("Playwright yielded %d real jobs for %s after filtering", len(jobs), company_name)
 
         if page > 1:
             pagination_pattern = detect_pagination(careers_url, html, None)

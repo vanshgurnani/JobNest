@@ -3,11 +3,55 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlparse
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_MAX_CONNECTIONS = 50
+
+
+def build_client(
+    *,
+    timeout: float = 25.0,
+    max_connections: int = _DEFAULT_MAX_CONNECTIONS,
+    http2: bool = False,
+    headers: dict[str, str] | None = None,
+    max_retries: int = 2,
+) -> httpx.AsyncClient:
+    """Create a connection-pooled httpx client for reuse across many requests."""
+    limits = httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max(4, int(max_connections * 0.3)),
+    )
+    return httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        limits=limits,
+        http2=http2,
+        headers=headers,
+        transport=httpx.AsyncHTTPTransport(retries=max_retries),
+    )
+
+
+@asynccontextmanager
+async def shared_httpx_client(
+    *,
+    timeout: float = 25.0,
+    max_connections: int = _DEFAULT_MAX_CONNECTIONS,
+    http2: bool = False,
+    headers: dict[str, str] | None = None,
+):
+    """Context manager yielding one pooled client for a whole scrape task."""
+    async with build_client(
+        timeout=timeout,
+        max_connections=max_connections,
+        http2=http2,
+        headers=headers,
+    ) as client:
+        yield client
 
 
 def _clean_text(value: str | None) -> str:
@@ -427,6 +471,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Lever for %s: %s", company, e)
+            raise RuntimeError(f"Lever failed for {company}: {e}") from e
 
     elif platform == "greenhouse":
         token = ats_info["token"]
@@ -456,6 +501,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Greenhouse for %s: %s", company, e)
+            raise RuntimeError(f"Greenhouse failed for {company}: {e}") from e
 
     elif platform == "ashby":
         token = ats_info["token"]
@@ -485,6 +531,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Ashby for %s: %s", company, e)
+            raise RuntimeError(f"Ashby failed for {company}: {e}") from e
 
     elif platform == "workday":
         subdomain = ats_info["subdomain"]
@@ -500,6 +547,17 @@ async def crawl_ats_jobs(
                 "searchText": keyword or "",
             }
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            # Workday CXS returns 422 Unprocessable Entity unless a session cookie is
+            # established first. Warm it by GETting a board page via the same client so
+            # cookies carry into the POST below.
+            try:
+                warm_url = f"https://{subdomain}.myworkdayjobs.com/en-US/{board}"
+                if client is not None:
+                    await client.get(warm_url, headers={"Accept": "text/html"})
+                else:
+                    await request_with_retries(warm_url, timeout=15.0)
+            except Exception:
+                pass
             data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
             listings = data.get("jobPostings") if isinstance(data, dict) else None
             if isinstance(listings, list):
@@ -559,6 +617,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Workday for %s: %s", company, e)
+            raise RuntimeError(f"Workday failed for {company}: {e}") from e
 
     elif platform == "smartrecruiters":
         token = ats_info["token"]
@@ -606,6 +665,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling SmartRecruiters for %s: %s", company, e)
+            raise RuntimeError(f"SmartRecruiters failed for {company}: {e}") from e
 
     elif platform == "oraclecloud":
         domain = ats_info["domain"]
@@ -671,10 +731,43 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Oracle Cloud for %s: %s", company, e)
+            raise RuntimeError(f"Oracle Cloud failed for {company}: {e}") from e
 
     elif platform == "phenom":
         domain = ats_info.get("domain", "")
         jobs = await _crawl_phenom(domain, company, keyword=keyword, location=location, page=page, limit=limit, client=client)
+
+    elif platform == "capgemini":
+        api_url = ats_info.get("api_url", "https://cg-jobstream-api.azurewebsites.net/api/job-search")
+        try:
+            params: dict[str, Any] = {"page": page, "size": max(limit, 1)}
+            if keyword:
+                params["search"] = keyword
+            if location:
+                params["country_code"] = location
+            if client is not None:
+                resp = await client.get(api_url, params=params)
+            else:
+                resp = await request_with_retries(api_url, params=params, timeout=30.0)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Capgemini API returned HTTP {resp.status_code}")
+            data = resp.json().get("data") or []
+            for raw in data:
+                normalized = normalize_job_payload({
+                    "job_id": raw.get("id") or raw.get("ref") or raw.get("hash"),
+                    "title": raw.get("title"),
+                    "location": raw.get("location") or raw.get("country_name"),
+                    "description": raw.get("description_stripped"),
+                    "apply_url": raw.get("apply_job_url"),
+                    "employment_type": raw.get("contract_type"),
+                    "experience": raw.get("experience_level"),
+                    "department": raw.get("department") or raw.get("sbu"),
+                }, company, "capgemini")
+                if _matches_filter(normalized, keyword=keyword, location=location):
+                    jobs.append(normalized)
+        except Exception as e:
+            logger.error("Failed crawling Capgemini for %s: %s", company, e)
+            raise RuntimeError(f"Capgemini failed for {company}: {e}") from e
 
     return _slice_page(jobs, page=page, limit=limit) if platform != "workday" else jobs
 
@@ -682,7 +775,7 @@ async def crawl_ats_jobs(
 def _coerce_string(value: Any) -> str:
     if isinstance(value, str):
         return _clean_text(value)
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     return ""
 

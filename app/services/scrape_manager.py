@@ -132,53 +132,69 @@ class ScrapeManager:
             if save_to_db:
                 logger.info("[TASK] %s: DB persistence enabled — results will be pushed after scraping", task.task_id)
 
-            for idx, target in enumerate(batch, 1):
+            if not batch:
+                task.message = "No targets to scrape"
+                task.status = "completed"
+                await task.emit()
+                return
+
+            concurrency = max(1, int(cfg.get("concurrency", min(len(batch), 5))))
+            sem = asyncio.Semaphore(concurrency)
+            logger.info("[TASK] %s: %d targets with concurrency=%d", task.task_id, len(batch), concurrency)
+
+            async def _scrape_target(target: str, is_url: bool) -> dict[str, Any]:
+                async with sem:
+                    try:
+                        result_jobs = await asyncio.wait_for(
+                            _scrape_company(
+                                None if is_url else target,
+                                company_url=target if is_url else None,
+                                keyword=keyword,
+                                location=location,
+                                pages=pages,
+                                page_size=page_size,
+                                delay_seconds=delay,
+                            ),
+                            timeout=300,
+                        )
+                        entry: dict[str, Any] = {"target": target, "jobs": result_jobs, "count": len(result_jobs)}
+                        logger.info("[TASK] %s scraped '%s': %d jobs", task.task_id, target, len(result_jobs))
+                    except asyncio.TimeoutError:
+                        entry = {"target": target, "jobs": [], "count": 0, "error": "Timeout"}
+                        logger.warning("[TASK] %s timed out scraping '%s'", task.task_id, target)
+                    except Exception as e:
+                        entry = {"target": target, "jobs": [], "count": 0, "error": str(e)}
+                        logger.error("[TASK] %s failed scraping '%s': %s", task.task_id, target, e)
+
+                    if save_to_db and not task._cancel_event.is_set():
+                        pushed = await self._push_to_db(entry.get("jobs", []), target)
+                        entry["saved_to_db"] = pushed
+                    return entry
+
+            targets = [(c, False) for c in companies] + [(u, True) for u in urls]
+            results = await asyncio.gather(
+                *[_scrape_target(t, iu) for t, iu in targets],
+                return_exceptions=True,
+            )
+
+            for idx, r in enumerate(results, 1):
+                label = targets[idx - 1][0]
                 if task._cancel_event.is_set():
                     task.status = "cancelled"
-                    task.message = "Cancelled by user"
+                    task.message = f"Cancelled by user after {idx - 1}/{len(batch)} targets"
                     await task.emit()
                     logger.warning("[TASK] %s cancelled by user after %d/%d targets", task.task_id, idx - 1, len(batch))
                     return
 
-                is_url = target in urls
-                label = target
-                task.message = f"[{idx}/{len(batch)}] Scraping {label}..."
-                task.progress = (idx - 1) / len(batch)
-                await task.emit()
-
-                try:
-                    result_jobs = await asyncio.wait_for(
-                        _scrape_company(
-                            None if is_url else target,
-                            company_url=target if is_url else None,
-                            keyword=keyword,
-                            location=location,
-                            pages=pages,
-                            page_size=page_size,
-                            delay_seconds=delay,
-                        ),
-                        timeout=300,
-                    )
-                    task.results.append({"target": target, "jobs": result_jobs, "count": len(result_jobs)})
-                    task.total += len(result_jobs)
-                    task.message = f"[{idx}/{len(batch)}] Done: {label} ({len(result_jobs)} jobs)"
-                    logger.info("[TASK] %s scraped '%s': %d jobs", task.task_id, label, len(result_jobs))
-                except asyncio.TimeoutError:
-                    task.results.append({"target": target, "jobs": [], "count": 0, "error": "Timeout"})
-                    task.message = f"[{idx}/{len(batch)}] Timeout: {label}"
-                    logger.warning("[TASK] %s timed out scraping '%s'", task.task_id, label)
-                except Exception as e:
-                    task.results.append({"target": target, "jobs": [], "count": 0, "error": str(e)})
-                    task.message = f"[{idx}/{len(batch)}] Failed: {label} — {e}"
-                    logger.error("[TASK] %s failed scraping '%s': %s", task.task_id, label, e)
-
-                if save_to_db:
-                    result_entry = task.results[-1]
-                    pushed = await self._push_to_db(result_entry.get("jobs", []), label)
-                    result_entry["saved_to_db"] = pushed
-                    task.message = f"{task.message} [db:{pushed}]"
-                    await task.emit()
-
+                entry = r if isinstance(r, dict) else {"target": label, "jobs": [], "count": 0, "error": str(r)}
+                task.results.append(entry)
+                task.total += entry.get("count", 0)
+                if entry.get("error"):
+                    task.message = f"[{idx}/{len(batch)}] Failed: {label} — {entry['error']}"
+                else:
+                    task.message = f"[{idx}/{len(batch)}] Done: {label} ({entry.get('count', 0)} jobs)"
+                    if entry.get("saved_to_db") is not None:
+                        task.message += f" [db:{entry['saved_to_db']}]"
                 task.progress = idx / len(batch)
                 await task.emit()
 

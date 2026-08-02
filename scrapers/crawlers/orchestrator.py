@@ -2,6 +2,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+import httpx
+
 from app.services.ai_parser import parse_job_details
 from scrapers.utils import company_name_from_url, supported_companies
 
@@ -33,6 +35,7 @@ async def _crawl_universal(
     page: int,
     limit: int,
     use_playwright: bool = False,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     from scrapers.crawlers.universal import universal_crawl_jobs
 
@@ -45,6 +48,7 @@ async def _crawl_universal(
             page=page,
             limit=limit,
             use_playwright=use_playwright,
+            client=client,
         )
         return {"company": company_name.title(), "status": "ok", "jobs": _enrich_jobs(jobs)}
     except Exception as exc:
@@ -60,6 +64,7 @@ async def crawl_jobs(
     page: int = 1,
     limit: int = 20,
     use_playwright: bool = False,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     name = company or (_company_name_from_url(company_url) if company_url else "unknown")
 
@@ -72,5 +77,6 @@ async def crawl_jobs(
             page=page,
             limit=limit,
             use_playwright=use_playwright,
+            client=client,
         )
     ]

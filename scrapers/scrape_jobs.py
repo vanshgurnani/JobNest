@@ -11,13 +11,14 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+import httpx
 
 # Ensure workspace root is on sys.path (must be before local package imports)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scrapers.crawlers.base import request_with_retries
+from scrapers.crawlers.base import request_with_retries, shared_httpx_client
 
 from app.schemas.job import canonicalize_job
 from scrapers.crawlers.orchestrator import crawl_jobs
@@ -34,8 +35,8 @@ def _parse_company_list(value: str | None) -> list[str]:
     for c in companies:
         if c not in known:
             LOGGER.warning(
-                "Company '%s' is not in company_urls.json. The scraper will try to auto-discover "
-                "its careers page, but you can add it to scrapers/company_urls.json for best results.",
+                "Company '%s' is not a seeded company. The scraper will auto-discover its "
+                "careers page and detect its ATS at runtime.",
                 c,
             )
     return companies
@@ -62,6 +63,23 @@ def _format_jobs_preview(jobs: list[dict[str, Any]]) -> str:
     return json.dumps(preview, indent=2, ensure_ascii=False)
 
 
+async def _push_to_db(jobs: list[dict[str, Any]]) -> int:
+    """Persist scraped jobs to MongoDB (mirrors POST /push-to-db)."""
+    if not jobs:
+        return 0
+    try:
+        from app.db.mongo import connect_mongo, close_mongo
+        from app.services.job_store import upsert_jobs
+
+        await connect_mongo()
+        await upsert_jobs(jobs)
+        await close_mongo()
+        return len(jobs)
+    except Exception as exc:
+        LOGGER.exception("Failed to push %d jobs to the database: %s", len(jobs), exc)
+        return 0
+
+
 class GenericScraper:
     def __init__(self, company: str = "") -> None:
         self.company = company
@@ -74,11 +92,12 @@ class GenericScraper:
         location: str | None = None,
         page: int = 1,
         limit: int = 20,
+        client: httpx.AsyncClient | None = None,
     ) -> list[dict[str, Any]]:
         fetch_url = _build_page_url(url, page) if page > 1 else url
         html: str | None = None
         try:
-            html = await request_with_retries(fetch_url)
+            html = await request_with_retries(fetch_url, client=client)
         except Exception as exc:
             self.logger.warning("GenericScraper failed to fetch %s: %s", fetch_url, exc)
             return []
@@ -98,7 +117,7 @@ class GenericScraper:
 
         # 0 — If page is a Phenom SPA (data-ph-id or phenompeople CDN), use sitemap-based approach
         if "data-ph-id" in html or "phenompeople.com" in html:
-            phenom_jobs = await _crawl_phenom(url, company_name, keyword=keyword, location=location, page=page, limit=limit)
+            phenom_jobs = await _crawl_phenom(url, company_name, keyword=keyword, location=location, page=page, limit=limit, client=client)
             if phenom_jobs:
                 return _slice_and_filter(phenom_jobs, keyword, location, page, limit)
 
@@ -271,7 +290,7 @@ class GenericScraper:
         _patch_detail_urls(all_jobs, html, url)
 
         if all_jobs:
-            all_jobs = await _enrich_jobs(all_jobs, page, limit)
+            all_jobs = await _enrich_jobs(all_jobs, page, limit, client=client)
 
         return _slice_and_filter(all_jobs, keyword, location, page, limit)
 
@@ -353,6 +372,7 @@ async def _enrich_jobs(
     jobs: list[dict[str, Any]],
     page: int,
     limit: int,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     _DEFAULT_DESC = "Job listing scraped from"
 
@@ -361,7 +381,7 @@ async def _enrich_jobs(
         if not detail_url:
             return job
         try:
-            detail_html = await request_with_retries(detail_url, timeout=10.0)
+            detail_html = await request_with_retries(detail_url, timeout=10.0, client=client)
             from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
 
             soup = BeautifulSoup(detail_html, "lxml")
@@ -482,9 +502,10 @@ _company_name_from_url = company_name_from_url
 
 
 class _ATSScraper:
-    def __init__(self, ats: str, company: str) -> None:
+    def __init__(self, ats: str, company: str, ats_info: dict[str, Any] | None = None) -> None:
         self.ats = ats
         self.company = company
+        self.ats_info = ats_info
         self.logger = LOGGER
 
     async def fetch_jobs(
@@ -494,10 +515,11 @@ class _ATSScraper:
         location: str | None = None,
         page: int = 1,
         limit: int = 20,
+        client: httpx.AsyncClient | None = None,
     ) -> list[dict[str, Any]]:
         from scrapers.crawlers.base import crawl_ats_jobs, detect_ats as detect_ats_impl
 
-        ats_info = detect_ats_impl(url or "", "")
+        ats_info = self.ats_info or detect_ats_impl(url or "", "")
         if not ats_info:
             self.logger.warning("ATS scraper could not detect ATS info for %s", url)
             return []
@@ -509,6 +531,7 @@ class _ATSScraper:
             location=location,
             page=page,
             limit=limit,
+            client=client,
         )
         return jobs
 
@@ -528,13 +551,14 @@ def route_scraper(url: str, html: str = "") -> GenericScraper | None:
 async def _enrich_job_descriptions(
     jobs: list[dict[str, Any]],
     label: str,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     BATCH = 5
     enriched = 0
     for i in range(0, len(jobs), BATCH):
         batch = jobs[i : i + BATCH]
         results = await asyncio.gather(
-            *[_fetch_description(j) for j in batch],
+            *[_fetch_description(j, client=client) for j in batch],
             return_exceptions=True,
         )
         for r in results:
@@ -545,12 +569,12 @@ async def _enrich_job_descriptions(
     return jobs
 
 
-async def _fetch_description(job: dict[str, Any]) -> dict[str, Any]:
+async def _fetch_description(job: dict[str, Any], client: httpx.AsyncClient | None = None) -> dict[str, Any]:
     url = job.get("apply_url") or job.get("url", "")
     if not url or job.get("description", "").strip():
         return job
     try:
-        html = await request_with_retries(url, timeout=10.0)
+        html = await request_with_retries(url, timeout=10.0, client=client)
         from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
 
         jsonld_items = _extract_jsonld_jobpostings(html)
@@ -585,6 +609,34 @@ async def _scrape_company(
     generic_only: bool = False,
     use_playwright: bool = False,
 ) -> list[dict[str, Any]]:
+    async with shared_httpx_client() as client:
+        return await _scrape_company_with_client(
+            company,
+            company_url=company_url,
+            keyword=keyword,
+            location=location,
+            pages=pages,
+            page_size=page_size,
+            delay_seconds=delay_seconds,
+            generic_only=generic_only,
+            use_playwright=use_playwright,
+            client=client,
+        )
+
+
+async def _scrape_company_with_client(
+    company: str | None,
+    *,
+    company_url: str | None,
+    keyword: str | None,
+    location: str | None,
+    pages: int,
+    page_size: int,
+    delay_seconds: float,
+    generic_only: bool,
+    use_playwright: bool,
+    client: httpx.AsyncClient,
+) -> list[dict[str, Any]]:
     all_jobs: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     if company_url:
@@ -601,6 +653,12 @@ async def _scrape_company(
             _scraper = GenericScraper(company=company_name)
         else:
             _scraper = route_scraper(company_url)
+    elif company and not company_url:
+        from scrapers.directory import ats_info as dir_atts_info
+        info = dir_atts_info(company)
+        if info:
+            LOGGER.info("[DIRECTORY] Using ATS adapter '%s' for '%s'", info.get("platform"), company)
+            _scraper = _ATSScraper(info.get("platform"), company, ats_info=info)
 
     for page in range(1, pages + 1):
         LOGGER.info("[SCRAPE] Fetching target='%s' page=%d limit=%d", label, page, page_size)
@@ -613,6 +671,7 @@ async def _scrape_company(
                     location=location,
                     page=page,
                     limit=page_size,
+                    client=client,
                 )
                 results = [{"status": "ok", "jobs": raw_jobs, "company": label}]
             except Exception as exc:
@@ -631,6 +690,7 @@ async def _scrape_company(
                     page=page,
                     limit=page_size,
                     use_playwright=use_playwright,
+                    client=client,
                 )
         else:
             results = await crawl_jobs(
@@ -641,6 +701,7 @@ async def _scrape_company(
                 page=page,
                 limit=page_size,
                 use_playwright=use_playwright,
+                client=client,
             )
 
         page_jobs: list[dict[str, Any]] = []
@@ -672,6 +733,7 @@ async def _scrape_company(
                 page=page,
                 limit=page_size,
                 use_playwright=use_playwright,
+                client=client,
             )
             for result in results:
                 for raw_job in result.get("jobs", []):
@@ -692,7 +754,7 @@ async def _scrape_company(
             await asyncio.sleep(delay_seconds)
 
     if all_jobs:
-        all_jobs = await _enrich_job_descriptions(all_jobs, label)
+        all_jobs = await _enrich_job_descriptions(all_jobs, label, client=client)
 
     LOGGER.info("[SCRAPE] Finished scraping target='%s'. Total jobs collected: %d", label, len(all_jobs))
     return all_jobs
@@ -714,53 +776,61 @@ async def _run(args: argparse.Namespace) -> None:
 
     LOGGER.info("=" * 60)
     LOGGER.info("STARTING JOB SCRAPER | Generic-only: %s", generic_only)
+    mode = getattr(args, "mode", "local")
+    LOGGER.info("Mode: %s | %s", mode.upper(), "JOB results will be persisted to the database" if mode == "db" else "JOB results are terminal-only")
     if companies:
         LOGGER.info("Target Companies: %s", ", ".join(companies))
     if urls:
         LOGGER.info("Target URLs: %s", ", ".join(urls))
-    LOGGER.info("Pages per Target: %d | Limit per Page: %d", args.pages, args.page_size)
+    LOGGER.info("Pages per Target: %d | Limit per Page: %d | Concurrency: %d", args.pages, args.page_size, getattr(args, "concurrency", 1))
     LOGGER.info("=" * 60)
 
     total_scraped = 0
     all_collected_jobs: list[dict[str, Any]] = []
+    # Order matters for consistent log ordering, so keep insertion order in the list.
+    targets = [(c, None) for c in companies] + [(None, u) for u in urls]
 
-    for company in companies:
-        LOGGER.info("[SEQUENTIAL] Processing company: %s", company)
-        jobs = await _scrape_company(
-            company,
-            keyword=args.keyword,
-            location=args.location,
-            pages=args.pages,
-            page_size=args.page_size,
-            delay_seconds=args.delay_seconds,
-            use_playwright=args.browser_first,
-        )
-        total_scraped += len(jobs)
-        all_collected_jobs.extend(jobs)
-        if args.delay_seconds > 0:
-            await asyncio.sleep(args.delay_seconds)
+    concurrency = getattr(args, "concurrency", 1)
+    sem = asyncio.Semaphore(concurrency)
 
-    for url in urls:
-        LOGGER.info("[SEQUENTIAL] Processing company URL: %s", url)
-        jobs = await _scrape_company(
-            company=None,
-            company_url=url,
-            keyword=args.keyword,
-            location=args.location,
-            pages=args.pages,
-            page_size=args.page_size,
-            delay_seconds=args.delay_seconds,
-            generic_only=generic_only,
-            use_playwright=args.browser_first,
-        )
-        total_scraped += len(jobs)
-        all_collected_jobs.extend(jobs)
-        if args.delay_seconds > 0:
-            await asyncio.sleep(args.delay_seconds)
+    async def _scrape_target(company: str | None, url: str | None) -> list[dict[str, Any]]:
+        async with sem:
+            label = url or company
+            LOGGER.info("[CONC] (%d-way) Processing target: %s", concurrency, label)
+            return await _scrape_company(
+                company,
+                company_url=url,
+                keyword=args.keyword,
+                location=args.location,
+                pages=args.pages,
+                page_size=args.page_size,
+                delay_seconds=args.delay_seconds,
+                generic_only=generic_only,
+                use_playwright=args.browser_first,
+            )
+
+    results = await asyncio.gather(
+        *[_scrape_target(c, u) for c, u in targets],
+        return_exceptions=True,
+    )
+
+    for label, result in zip([x or y for x, y in targets], results):
+        if isinstance(result, Exception):
+            LOGGER.error("[CONCURRENCY] Target '%s' raised an unhandled exception: %s", label, result)
+            continue
+        total_scraped += len(result)
+        all_collected_jobs.extend(result)
+
+    pushed = 0
+    if mode == "db" and all_collected_jobs:
+        pushed = await _push_to_db(all_collected_jobs)
+        LOGGER.info("Pushed %d/%d scraped jobs to the database.", pushed, len(all_collected_jobs))
 
     LOGGER.info("=" * 60)
-    LOGGER.info("SCRAPE SUMMARY")
+    LOGGER.info("SCRAPE SUMMARY | Mode: %s", mode.upper())
     LOGGER.info("Total Jobs Scraped Across All Targets: %d", total_scraped)
+    if mode == "db":
+        LOGGER.info("Jobs Persisted to Database: %d", pushed)
 
     if all_collected_jobs:
         LOGGER.info("\n--- FIRST 4 DATA POINTS PREVIEW ---\n%s\n---------------------------------", _format_jobs_preview(all_collected_jobs))
@@ -779,8 +849,15 @@ def main() -> None:
     parser.add_argument("--pages", type=int, default=2, help="Number of pages to scrape per company.")
     parser.add_argument("--page-size", type=int, default=20, help="Number of items per page.")
     parser.add_argument("--delay-seconds", type=float, default=0.5, help="Delay between page/company requests in seconds (CPU protection).")
+    parser.add_argument("--concurrency", type=int, default=1, help="Max companies/URLs to scrape in parallel (default 1 = sequential).")
     parser.add_argument("--generic-only", action="store_true", help="Skip registered companies; scrape provided URLs with the generic fallback scraper only.")
     parser.add_argument("--browser-first", action="store_true", help="Use Playwright immediately for known SPA-heavy sites instead of as last resort.")
+    parser.add_argument(
+        "--mode",
+        choices=["local", "db"],
+        default="local",
+        help="local = print results to terminal only; db = persist scraped jobs to MongoDB (like POST /push-to-db).",
+    )
 
     args = parser.parse_args()
     asyncio.run(_run(args))

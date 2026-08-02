@@ -277,8 +277,19 @@ async def run_scrape(request: Request) -> dict:
             return {"target": target, "jobs": [], "count": 0, "error": str(e)}
 
     batch = companies + urls
+    concurrency = max(1, int(body.get("concurrency", min(len(batch), 5) if len(batch) > 1 else 1)))
+    logger.info("POST /scrape concurrency=%d targets=%d", concurrency, len(batch))
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _scrape_bounded(target: str, *, is_url: bool = False) -> dict[str, Any]:
+        async with sem:
+            return await _scrape_one(target, is_url=is_url)
+
     if len(batch) > 1:
-        results = await asyncio.gather(*[_scrape_one(c) for c in companies] + [_scrape_one(u, is_url=True) for u in urls], return_exceptions=True)
+        results = await asyncio.gather(
+            *[_scrape_bounded(c) for c in companies] + [_scrape_bounded(u, is_url=True) for u in urls],
+            return_exceptions=True,
+        )
         for r in results:
             if isinstance(r, Exception):
                 logger.error("Parallel scrape failed: %s", r)

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
@@ -26,24 +24,41 @@ def sanitize_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(cleaned, doseq=True), parsed.fragment))
 
 
+_GENERIC_TLDS = {
+    "com", "org", "net", "edu", "gov", "mil", "io", "co", "in", "uk", "us",
+    "de", "fr", "es", "it", "nl", "se", "no", "dk", "fi", "pl", "au", "ca",
+    "jp", "kr", "sg", "ae", "sa", "za", "br", "mx", "ru", "cn", "hk", "nz",
+    "ch", "at", "be", "pt", "gr", "tr", "il", "th", "my", "id", "vn", "tw",
+    "info", "biz", "me", "tv", "asia", "eu", "int", "xyz", "tech", "online",
+    "site", "store", "app", "dev", "ai", "cloud", "data", "email", "jobs",
+}
+
+
 def company_name_from_url(url: str) -> str:
     extracted = tldextract.extract(url)
-    domain = extracted.domain or url.split("//")[-1].split("/")[0].split(".")[0]
-    return domain.replace("-", " ").replace("_", " ").title()
+    suffix = (extracted.suffix or "").lower()
+    last_suffix = suffix.split(".")[-1]
+    if suffix and last_suffix not in _GENERIC_TLDS and not suffix.count(".") >= 1:
+        # Brand TLDs (e.g. jobs.barclays, careers.google): the suffix itself is
+        # the company, not a generic domain. tldextract would otherwise report
+        # the subdomain label as the "domain".
+        name = suffix.split(".")[-1]
+    else:
+        name = extracted.domain
+    if not name:
+        name = url.split("//")[-1].split("/")[0].split(".")[0]
+    return name.replace("-", " ").replace("_", " ").title()
 
 
 def supported_companies() -> list[str]:
-    _path = Path(__file__).resolve().parent / "company_urls.json"
-    companies: list[str] = []
-    if _path.exists():
-        try:
-            raw = json.loads(_path.read_text(encoding="utf-8"))
-            for key in raw:
-                if not key.startswith("_"):
-                    companies.append(key)
-        except Exception:
-            pass
-    return companies
+    """Known company seeds from the in-code directory (bootstrap hints only).
+
+    Everything not listed here is still discoverable at runtime by the
+    universal scraper (careers-page resolution + ATS detection).
+    """
+    from scrapers.directory import companies as directory_companies
+
+    return directory_companies()
 
 
 def detect_ats(url: str, html_content: str = "") -> dict[str, Any] | str | None:
