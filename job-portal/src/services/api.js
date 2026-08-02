@@ -1,23 +1,41 @@
+import logger from '../utils/logger';
+
 const BASE = import.meta.env.VITE_API_BASE || '/api';
 
 async function request(url, options = {}) {
-  const res = await fetch(`${BASE}${url}`, {
-    headers: { Accept: 'application/json', ...options.headers },
-    ...options,
-  });
+  const started = performance.now();
+  logger.info('api', `→ ${options.method || 'GET'} ${url}`);
+
+  let res;
+  try {
+    res = await fetch(`${BASE}${url}`, {
+      headers: { Accept: 'application/json', ...options.headers },
+      ...options,
+    });
+  } catch (e) {
+    logger.error('api', `Network error on ${url}: ${e.message}`);
+    throw e;
+  }
+
+  const elapsed = Math.round(performance.now() - started);
 
   if (!res.ok) {
     if (res.status === 503) {
+      logger.warn('api', `503 on ${url} (${elapsed}ms) — DB unavailable`);
       throw new Error('Database is not available. Please run the scraper first.');
     }
     if (res.status === 404) {
+      logger.warn('api', `404 on ${url} (${elapsed}ms) — not found`);
       throw new Error('Job not found.');
     }
     const text = await res.text().catch(() => '');
+    logger.error('api', `${res.status} on ${url} (${elapsed}ms): ${text}`);
     throw new Error(text || `Request failed (${res.status})`);
   }
 
-  return res.json();
+  const data = await res.json();
+  logger.info('api', `← ${res.status} ${url} (${elapsed}ms)`);
+  return data;
 }
 
 export async function fetchJobs({ company, keyword, location, employmentType, experience, page = 1, limit = 20 } = {}) {
@@ -53,4 +71,19 @@ export async function fetchHealth() {
 export async function fetchCompanies() {
   const data = await request('/companies');
   return data.companies || [];
+}
+
+export async function pushJobsToDb(jobs) {
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    logger.warn('api', 'pushJobsToDb called with no jobs');
+    return 0;
+  }
+  logger.info('api', `Pushing ${jobs.length} jobs to database...`);
+  const data = await request('/push-to-db', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jobs }),
+  });
+  logger.info('api', `DB push complete: ${data.saved} saved`);
+  return data.saved;
 }

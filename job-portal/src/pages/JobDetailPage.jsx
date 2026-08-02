@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { fetchJobById } from '../services/api';
+import logger from '../utils/logger';
 
 function cleanDescription(text) {
   if (!text) return '';
@@ -28,12 +29,17 @@ export default function JobDetailPage() {
   useEffect(() => {
     setLoading(true);
     setError(null);
+    logger.info('JobDetailPage', `Fetching job ${id}`);
     fetchJobById(id)
       .then((data) => {
         if (!data) throw new Error('Job not found');
+        logger.info('JobDetailPage', `Loaded job "${data.title}" (${data.company})`);
         setJob(data);
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => {
+        logger.error('JobDetailPage', `Failed to load job ${id}: ${err.message}`);
+        setError(err.message);
+      })
       .finally(() => setLoading(false));
   }, [id]);
 
@@ -51,10 +57,12 @@ export default function JobDetailPage() {
       const next = stored.filter((s) => s !== jid);
       localStorage.setItem('savedJobs', JSON.stringify(next));
       setSaved(false);
+      logger.info('JobDetailPage', `Unsaved job ${jid}`);
     } else {
       stored.push(jid);
       localStorage.setItem('savedJobs', JSON.stringify(stored));
       setSaved(true);
+      logger.info('JobDetailPage', `Saved job ${jid}`);
     }
   }
 

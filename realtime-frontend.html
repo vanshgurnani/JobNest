@@ -155,7 +155,12 @@
     <div class="controls">
       <button class="btn btn-start" id="startBtn" onclick="startScrape()">Start Scrape</button>
       <button class="btn btn-stop" id="stopBtn" onclick="stopScrape()" disabled>Stop</button>
+      <button class="btn btn-outline" id="pushBtn" onclick="pushToDb()" disabled>Push to DB</button>
       <button class="btn btn-outline" onclick="clearAll()">Clear</button>
+      <label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem;color:#94a3b8;cursor:pointer;margin-left:auto;">
+        <input type="checkbox" id="saveToDb" style="accent-color:#16a34a;" onchange="toggleSaveToDb()">
+        Auto-save to DB
+      </label>
     </div>
   </div>
 
@@ -196,6 +201,37 @@ function log(type, msg) {
   entry.innerHTML = `<span class="ts">[${ts}]</span>${msg}`;
   area.appendChild(entry);
   area.scrollTop = area.scrollHeight;
+  const consoleFn = type === 'fail' ? console.error : type === 'ok' || type === 'done' ? console.log : console.log;
+  consoleFn(`[${ts}] [${type.toUpperCase()}] ${msg.replace(/<[^>]+>/g, '')}`);
+}
+
+function toggleSaveToDb() {
+  const on = document.getElementById('saveToDb').checked;
+  log('info', `Auto-save to DB ${on ? 'enabled' : 'disabled'}`);
+}
+
+let lastResults = [];
+
+async function pushToDb() {
+  if (!lastResults.length) return;
+  const allJobs = lastResults.flatMap(r => r.jobs || []);
+  const btn = document.getElementById('pushBtn');
+  btn.disabled = true;
+  log('info', `Pushing ${allJobs.length} jobs to database...`);
+  try {
+    const res = await fetch('http://127.0.0.1:8000/push-to-db', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobs: allJobs }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    log('ok', `Pushed ${data.saved} jobs to database`);
+  } catch (e) {
+    log('fail', `Push to DB failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function setProgress(pct) {
@@ -204,6 +240,7 @@ function setProgress(pct) {
 
 async function startScrape() {
   const mode = document.querySelector('input[name="targetMode"]:checked').value;
+  const saveToDb = document.getElementById('saveToDb').checked;
   const body = {
     companies: mode === 'names' ? document.getElementById('companies').value : '',
     company_url: mode === 'url' ? document.getElementById('companyUrl').value : '',
@@ -212,16 +249,22 @@ async function startScrape() {
     pages: parseInt(document.getElementById('pages').value) || 2,
     page_size: parseInt(document.getElementById('pageSize').value) || 20,
     delay_seconds: 0.5,
+    save_to_db: saveToDb,
   };
 
   document.getElementById('startBtn').disabled = true;
   document.getElementById('stopBtn').disabled = false;
+  document.getElementById('pushBtn').disabled = true;
   document.getElementById('spinner').style.display = '';
   document.getElementById('statusMsg').textContent = 'Starting...';
   document.getElementById('resultsPanel').style.display = 'none';
   document.getElementById('resultsArea').innerHTML = '';
   document.getElementById('logArea').innerHTML = '';
+  lastResults = [];
   setProgress(0);
+
+  log('info', `Starting scrape | mode=${mode} | save_to_db=${saveToDb}`);
+  log('info', `Config: ${JSON.stringify({ ...body, companies: body.companies || undefined, company_url: body.company_url || undefined })}`);
 
   try {
     const res = await fetch('http://127.0.0.1:8000/scrape/start', {
@@ -230,6 +273,7 @@ async function startScrape() {
       body: JSON.stringify(body),
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
     currentTaskId = data.task_id;
     log('info', `Task started: ${currentTaskId}`);
     connectSSE(currentTaskId);
@@ -246,12 +290,17 @@ function connectSSE(taskId) {
   if (eventSource) eventSource.close();
   eventSource = new EventSource(`http://127.0.0.1:8000/scrape/events/${taskId}`);
 
+  eventSource.onopen = function() {
+    log('ok', 'SSE connected');
+  };
+
   eventSource.onmessage = function(e) {
     const data = JSON.parse(e.data);
     handleEvent(data);
   };
 
   eventSource.onerror = function() {
+    log('warn', 'SSE connection lost — switching to polling');
     // Try polling as fallback when SSE fails
     eventSource.close();
     pollTask(taskId);
@@ -284,15 +333,24 @@ function handleEvent(data) {
     statusMsg.textContent = data.message || 'Running...';
     statusProgress.textContent = data.progress > 0 ? Math.round(data.progress * 100) + '%' : '';
     setProgress(data.progress);
-  } else if (data.status === 'completed') {
-    document.getElementById('spinner').style.display = 'none';
+  } else if (data.status === 'completed') {    document.getElementById('spinner').style.display = 'none';
     statusMsg.textContent = data.message || 'Completed';
     statusProgress.textContent = '100%';
     setProgress(1);
     log('done', `Completed — ${data.total} total jobs`);
     document.getElementById('startBtn').disabled = false;
     document.getElementById('stopBtn').disabled = true;
+    document.getElementById('pushBtn').disabled = !(data.results && data.results.length);
     showResults(data.results, data.total);
+    if (data.results) {
+      lastResults = data.results;
+      const pushed = data.results.filter(r => r.saved_to_db);
+      if (pushed.length) {
+        log('ok', `Auto-save complete — ${pushed.map(r => r.target + ':' + r.saved_to_db).join(', ')}`);
+      }
+    }
+    if (eventSource) eventSource.close();
+    if (pollTimer) clearInterval(pollTimer);
   } else if (data.status === 'cancelled') {
     document.getElementById('spinner').style.display = 'none';
     statusMsg.textContent = 'Cancelled';
@@ -313,6 +371,12 @@ function handleEvent(data) {
   if (data.message && !data.message.startsWith('[')) {
     log('info', data.message);
   }
+}
+
+function logEvent(raw) {
+  try {
+    log('info', 'Event: ' + raw);
+  } catch (e) { /* ignore */ }
 }
 
 async function stopScrape() {
@@ -373,6 +437,7 @@ function clearAll() {
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   currentTaskId = null;
+  lastResults = [];
   document.getElementById('logArea').innerHTML = '';
   document.getElementById('resultsArea').innerHTML = '';
   document.getElementById('resultsPanel').style.display = 'none';
@@ -380,8 +445,10 @@ function clearAll() {
   document.getElementById('statusProgress').textContent = '';
   document.getElementById('startBtn').disabled = false;
   document.getElementById('stopBtn').disabled = true;
+  document.getElementById('pushBtn').disabled = true;
   document.getElementById('spinner').style.display = 'none';
   setProgress(0);
+  log('info', 'Cleared');
 }
 
 function esc(s) {

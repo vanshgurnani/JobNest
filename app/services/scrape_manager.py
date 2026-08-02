@@ -63,12 +63,14 @@ class ScrapeManager:
         task = ScrapeTask(task_id, config)
         self._tasks[task_id] = task
         task._task = asyncio.create_task(self._run(task))
+        logger.info("[TASK] Started scrape task %s config=%s", task_id, json.dumps(config, default=str))
         return task_id
 
     def stop(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
         if task and task.status == "running":
             task._cancel_event.set()
+            logger.info("[TASK] Cancel requested for task %s", task_id)
             return True
         return False
 
@@ -81,6 +83,24 @@ class ScrapeManager:
                  if t.status in ("completed", "cancelled", "failed") and (t._task and t._task.done())]
         for tid in stale:
             self._tasks.pop(tid, None)
+            logger.info("[TASK] Cleaned up finished task %s", tid)
+
+    async def _push_to_db(self, jobs: list[dict[str, Any]], label: str) -> int:
+        if not jobs:
+            logger.info("[DB] No jobs to push for '%s'", label)
+            return 0
+        try:
+            from app.db.mongo import connect_mongo, close_mongo
+            from app.services.job_store import upsert_jobs
+
+            await connect_mongo()
+            await upsert_jobs(jobs)
+            await close_mongo()
+            logger.info("[DB] Pushed %d jobs to database for '%s'", len(jobs), label)
+            return len(jobs)
+        except Exception as exc:
+            logger.exception("[DB] Failed to push jobs for '%s': %s", label, exc)
+            return 0
 
     async def _run(self, task: ScrapeTask) -> None:
         task.status = "running"
@@ -106,13 +126,18 @@ class ScrapeManager:
             pages = int(cfg.get("pages", 2))
             page_size = int(cfg.get("page_size", 20))
             delay = float(cfg.get("delay_seconds", 0.5))
+            save_to_db = bool(cfg.get("save_to_db", False))
             batch = companies + urls
+
+            if save_to_db:
+                logger.info("[TASK] %s: DB persistence enabled — results will be pushed after scraping", task.task_id)
 
             for idx, target in enumerate(batch, 1):
                 if task._cancel_event.is_set():
                     task.status = "cancelled"
                     task.message = "Cancelled by user"
                     await task.emit()
+                    logger.warning("[TASK] %s cancelled by user after %d/%d targets", task.task_id, idx - 1, len(batch))
                     return
 
                 is_url = target in urls
@@ -137,12 +162,22 @@ class ScrapeManager:
                     task.results.append({"target": target, "jobs": result_jobs, "count": len(result_jobs)})
                     task.total += len(result_jobs)
                     task.message = f"[{idx}/{len(batch)}] Done: {label} ({len(result_jobs)} jobs)"
+                    logger.info("[TASK] %s scraped '%s': %d jobs", task.task_id, label, len(result_jobs))
                 except asyncio.TimeoutError:
                     task.results.append({"target": target, "jobs": [], "count": 0, "error": "Timeout"})
                     task.message = f"[{idx}/{len(batch)}] Timeout: {label}"
+                    logger.warning("[TASK] %s timed out scraping '%s'", task.task_id, label)
                 except Exception as e:
                     task.results.append({"target": target, "jobs": [], "count": 0, "error": str(e)})
                     task.message = f"[{idx}/{len(batch)}] Failed: {label} — {e}"
+                    logger.error("[TASK] %s failed scraping '%s': %s", task.task_id, label, e)
+
+                if save_to_db:
+                    result_entry = task.results[-1]
+                    pushed = await self._push_to_db(result_entry.get("jobs", []), label)
+                    result_entry["saved_to_db"] = pushed
+                    task.message = f"{task.message} [db:{pushed}]"
+                    await task.emit()
 
                 task.progress = idx / len(batch)
                 await task.emit()
@@ -150,6 +185,7 @@ class ScrapeManager:
             task.status = "completed"
             task.message = f"Done — {task.total} jobs from {len(batch)} targets"
             await task.emit()
+            logger.info("[TASK] %s completed: %d jobs from %d targets", task.task_id, task.total, len(batch))
 
         except Exception as e:
             task.status = "failed"

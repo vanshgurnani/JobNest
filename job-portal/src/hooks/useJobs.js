@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchJobs } from '../services/api';
+import logger from '../utils/logger';
 
 const CACHE_TTL = 10 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 50;
@@ -29,6 +30,7 @@ export function useJobs({ company, keyword, location, employmentType, experience
         }));
         setLoading(false);
         setError(null);
+        logger.info('useJobs', `Cache hit for ${cacheKey} (${cached.jobs.length} jobs)`);
         return;
       }
 
@@ -41,6 +43,7 @@ export function useJobs({ company, keyword, location, employmentType, experience
         setData({ jobs: [], total: 0, page: 1 });
       }
 
+      logger.info('useJobs', `Fetching page ${page} ${append ? '(append)' : ''} for key=${cacheKey}`);
       try {
         const result = await fetchJobs({ company, keyword, location, employmentType, experience, page });
         if (rid !== requestIdRef.current) return;
@@ -53,8 +56,10 @@ export function useJobs({ company, keyword, location, employmentType, experience
           total: result.total,
           page,
         }));
+        logger.info('useJobs', `Loaded page ${page}: ${result.jobs.length} jobs (total ${result.total})`);
       } catch (err) {
         if (rid !== requestIdRef.current) return;
+        logger.error('useJobs', `Failed to load page ${page}: ${err.message}`);
         setError(err.message || 'Failed to load jobs');
       } finally {
         if (rid === requestIdRef.current) {

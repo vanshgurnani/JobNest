@@ -7,6 +7,7 @@ import Pagination from '../components/Pagination';
 import EmptyState from '../components/EmptyState';
 import ErrorState from '../components/ErrorState';
 import { useJobs } from '../hooks/useJobs';
+import logger from '../utils/logger';
 
 const PAGE_SIZE = 20;
 
@@ -33,6 +34,7 @@ export default function FindJobsPage() {
 
   function handleSearch(e) {
     e.preventDefault();
+    logger.info('FindJobsPage', `Search keyword="${keyword.trim()}"`);
     const params = new URLSearchParams();
     if (keyword.trim()) params.set('keyword', keyword.trim());
     if (locationParam) params.set('location', locationParam);
@@ -43,6 +45,7 @@ export default function FindJobsPage() {
   }
 
   function handleFilterChange(next) {
+    logger.info('FindJobsPage', `Filters changed → ${JSON.stringify(next)}`);
     setFilters(next);
     const params = new URLSearchParams(searchParams);
     if (next.employmentType) params.set('employmentType', next.employmentType);
@@ -53,12 +56,14 @@ export default function FindJobsPage() {
   }
 
   function handleClear() {
+    logger.info('FindJobsPage', 'Cleared all filters');
     setKeyword('');
     setFilters({ employmentType: '', experience: '' });
     setSearchParams({});
   }
 
   function handlePageChange(pg) {
+    logger.info('FindJobsPage', `Page change → ${pg}`);
     window.scrollTo({ top: 0, behavior: 'smooth' });
     load(pg);
   }

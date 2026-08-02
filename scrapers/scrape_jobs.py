@@ -709,10 +709,8 @@ async def _run(args: argparse.Namespace) -> None:
     if not companies and not urls:
         raise SystemExit("No companies or company URLs selected for scraping.")
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    )
+    from app.services.logging_setup import setup_logging
+    setup_logging()
 
     LOGGER.info("=" * 60)
     LOGGER.info("STARTING JOB SCRAPER | Generic-only: %s", generic_only)

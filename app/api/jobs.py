@@ -22,6 +22,8 @@ router = APIRouter(prefix="", tags=["jobs"])
 
 _WEBHOOKS: list[dict[str, Any]] = []
 
+_CLIENT_LOGS: list[dict[str, Any]] = []
+
 
 async def _notify_webhooks(target: str, count: int) -> None:
     if not _WEBHOOKS:
@@ -74,7 +76,9 @@ async def get_companies() -> dict:
         if not companies:
             companies = [c.title() for c in supported_companies()]
     except RuntimeError:
+        logger.warning("find_companies failed; falling back to supported_companies")
         companies = [c.title() for c in supported_companies()]
+    logger.info("GET /companies returned %d companies", len(companies))
     return {"companies": companies}
 
 
@@ -115,6 +119,7 @@ async def get_jobs(
 
     cached = await crawl_cache.get(cache_key)
     if cached is not None:
+        logger.info("GET /jobs cache hit for key=%s", cache_key)
         return {**cached, "cache": "memory"}
 
     try:
@@ -129,8 +134,10 @@ async def get_jobs(
             fresh_only=False,
         )
     except RuntimeError:
+        logger.warning("GET /jobs DB unavailable for key=%s", cache_key)
         raise HTTPException(status_code=503, detail="Job database is not available")
 
+    logger.info("GET /jobs query resolved: total=%d returned=%d (key=%s)", total, len(jobs), cache_key)
     return await _cache_response(cache_key, {
         "total": total,
         "latest_jobs": jobs,
@@ -173,6 +180,7 @@ async def get_company_jobs(
 
     cached = await crawl_cache.get(cache_key)
     if cached is not None:
+        logger.info("GET /jobs/%s cache hit for key=%s", company_key, cache_key)
         return {**cached, "cache": "memory"}
 
     try:
@@ -187,8 +195,10 @@ async def get_company_jobs(
             fresh_only=False,
         )
     except RuntimeError:
+        logger.warning("GET /jobs/%s DB unavailable", company_key)
         raise HTTPException(status_code=503, detail="Job database is not available")
 
+    logger.info("GET /jobs/%s resolved: total=%d returned=%d", company_key, total, len(jobs))
     return await _cache_response(cache_key, {
         "company": jobs[0].get("company", company.title()) if jobs else company.title(),
         "total": total,
@@ -209,6 +219,12 @@ async def run_scrape(request: Request) -> dict:
     pages = int(body.get("pages", 2))
     page_size = int(body.get("page_size", 20))
     delay = float(body.get("delay_seconds", 0.5))
+    save_to_db = bool(body.get("save_to_db", False))
+
+    logger.info(
+        "POST /scrape requested companies='%s' urls='%s' keyword=%s location=%s pages=%d page_size=%d save_to_db=%s",
+        companies_str, urls_str, keyword, location, pages, page_size, save_to_db,
+    )
 
     mod = await _get_scraper()
     explicit_companies = [c.strip().lower() for c in companies_str.split(",") if c.strip()] if companies_str else []
@@ -243,6 +259,10 @@ async def run_scrape(request: Request) -> dict:
             metrics.record_success(target, job_count, "scrape", duration)
             audit.record(target, duration, job_count, "scrape")
             logger.info("Scraped %s: %d jobs", target, job_count)
+            if save_to_db:
+                pushed = await _save_results(jobs, target)
+                logger.info("Pushed %d jobs from '%s' to database", pushed, target)
+                return {"target": target, "jobs": jobs, "count": job_count, "saved_to_db": pushed}
             return {"target": target, "jobs": jobs, "count": job_count}
         except asyncio.TimeoutError:
             duration = time.monotonic() - start
@@ -274,7 +294,26 @@ async def run_scrape(request: Request) -> dict:
     total = sum(r["count"] for r in all_results)
     for r in all_results:
         await _notify_webhooks(r["target"], r["count"])
-    return {"results": all_results, "total": total, "mode": "local"}
+    logger.info("POST /scrape completed: total=%d targets=%d save_to_db=%s", total, len(all_results), save_to_db)
+    return {"results": all_results, "total": total, "mode": "local" if not save_to_db else "db"}
+
+
+async def _save_results(jobs: list[dict[str, Any]], label: str) -> int:
+    """Persist scraped jobs to MongoDB (mirrors POST /push-to-db)."""
+    if not jobs:
+        return 0
+    try:
+        from app.db.mongo import connect_mongo, close_mongo
+        from app.services.job_store import upsert_jobs
+
+        await connect_mongo()
+        canonicalized = [canonicalize_job(j) for j in jobs]
+        await upsert_jobs(canonicalized)
+        await close_mongo()
+        return len(canonicalized)
+    except Exception as exc:
+        logger.exception("Failed to push %d jobs from '%s' to database: %s", len(jobs), label, exc)
+        return 0
 
 
 @router.post("/scrape/start")
@@ -282,6 +321,7 @@ async def start_scrape(request: Request) -> dict:
     body = await request.json()
     from app.services.scrape_manager import manager
     task_id = await manager.start(body)
+    logger.info("POST /scrape/start created task %s", task_id)
     return {"task_id": task_id}
 
 
@@ -326,12 +366,15 @@ async def push_to_db(request: Request) -> dict:
     body = await request.json()
     jobs = body.get("jobs", [])
     if not jobs:
+        logger.warning("POST /push-to-db called with no jobs")
         raise HTTPException(status_code=400, detail="No jobs provided")
 
+    logger.info("POST /push-to-db received %d jobs", len(jobs))
     try:
         from app.db.mongo import connect_mongo
         await connect_mongo()
     except Exception as exc:
+        logger.error("POST /push-to-db MongoDB connection failed: %s", exc)
         raise HTTPException(status_code=503, detail=f"MongoDB connection failed: {exc}")
 
     saved = 0
@@ -343,14 +386,52 @@ async def push_to_db(request: Request) -> dict:
             canonicalized.append(canonicalize_job(j))
         await upsert_jobs(canonicalized)
         saved = len(canonicalized)
-        logger.info("Pushed %d jobs to database", saved)
+        logger.info("Pushed %d jobs to database (upsert)", saved)
     except Exception as exc:
+        logger.exception("Failed to save %d jobs: %s", len(jobs), exc)
         raise HTTPException(status_code=500, detail=f"Failed to save jobs: {exc}")
     finally:
         from app.db.mongo import close_mongo
         await close_mongo()
 
     return {"saved": saved}
+
+
+@router.post("/logs")
+async def ingest_client_logs(request: Request) -> dict:
+    body = await request.json()
+    entries = body.get("logs", []) if isinstance(body, dict) else body
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="Invalid logs payload")
+
+    accepted = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        level = str(entry.get("level", "info")).upper()
+        message = str(entry.get("message", "")).strip()
+        if not message:
+            continue
+        _CLIENT_LOGS.append({
+            "level": level,
+            "message": message,
+            "source": str(entry.get("source", "client"))[:200],
+            "timestamp": entry.get("timestamp", datetime.utcnow().isoformat()),
+            "url": str(entry.get("url", ""))[:500],
+        })
+        getattr(logger, level.lower(), logger.info)("[CLIENT] %s", message)
+        accepted += 1
+
+    if len(_CLIENT_LOGS) > 2000:
+        del _CLIENT_LOGS[: len(_CLIENT_LOGS) - 2000]
+
+    logger.info("POST /logs accepted %d/%d client log entries", accepted, len(entries))
+    return {"accepted": accepted}
+
+
+@router.get("/logs")
+async def list_client_logs(limit: int = Query(default=100, ge=1, le=1000)) -> dict:
+    return {"logs": _CLIENT_LOGS[-limit:], "count": len(_CLIENT_LOGS)}
 
 
 @router.post("/webhooks")
@@ -384,14 +465,17 @@ async def get_job_detail(job_id: str):
     cache_key = build_cache_key(route="job_detail", job_id=job_id)
     cached = await crawl_cache.get(cache_key)
     if cached is not None:
+        logger.info("GET /job/%s cache hit", job_id)
         return {**cached, "cache": "memory"}
 
     try:
         job = await find_job_by_id(job_id)
     except RuntimeError:
+        logger.warning("GET /job/%s DB unavailable", job_id)
         raise HTTPException(status_code=503, detail="Job detail storage is not available")
 
     if not job:
+        logger.info("GET /job/%s not found", job_id)
         raise HTTPException(status_code=404, detail="Job not found")
 
     return await _cache_response(cache_key, {"job": job, "cache": "mongo"})

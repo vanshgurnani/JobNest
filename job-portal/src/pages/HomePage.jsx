@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { fetchCompanies } from '../services/api';
+import logger from '../utils/logger';
 
 function useSlideIn(threshold = 0.1) {
   const ref = useRef(null);
@@ -55,11 +56,20 @@ export default function HomePage() {
   const [companies, setCompanies] = useState([]);
 
   useEffect(() => {
-    fetchCompanies().then(setCompanies).catch(() => {});
+    logger.info('HomePage', 'Loading popular companies...');
+    fetchCompanies()
+      .then((list) => {
+        logger.info('HomePage', `Loaded ${list.length} companies`);
+        setCompanies(list);
+      })
+      .catch((e) => {
+        logger.warn('HomePage', `Failed to load companies: ${e.message}`);
+      });
   }, []);
 
   function handleSearch(e) {
     e.preventDefault();
+    logger.info('HomePage', `Search: keyword="${keyword.trim()}" location="${location.trim()}" company="${company.trim()}"`);
     const params = new URLSearchParams();
     if (keyword.trim()) params.set('keyword', keyword.trim());
     if (location.trim()) params.set('location', location.trim());
@@ -68,6 +78,7 @@ export default function HomePage() {
   }
 
   function handleCompanyClick(name) {
+    logger.info('HomePage', `Quick filter: company="${name}"`);
     navigate(`/jobs?company=${encodeURIComponent(name)}`);
   }
 
