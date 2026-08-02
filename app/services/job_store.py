@@ -9,6 +9,7 @@ from pymongo import ASCENDING, DESCENDING
 from app.config import get_settings
 from app.db.mongo import get_db
 from app.schemas.job import canonicalize_job
+from app.services.normalizer import html_to_text
 
 
 _MAX_INPUT_LENGTH = 200
@@ -33,6 +34,8 @@ def _serialize_job(job: dict[str, Any]) -> dict[str, Any]:
     crawled_at = serialized.get("crawled_at")
     if isinstance(crawled_at, datetime):
         serialized["crawled_at"] = crawled_at.isoformat()
+    if serialized.get("description"):
+        serialized["description"] = html_to_text(serialized["description"])
     return serialized
 
 
