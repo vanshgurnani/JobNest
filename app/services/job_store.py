@@ -104,14 +104,18 @@ async def find_jobs(
     return jobs, total
 
 
-async def find_companies() -> list[str]:
+async def find_companies() -> list[dict[str, Any]]:
     db = get_db()
     pipeline = [
-        {"$group": {"_id": "$company"}},
+        {"$group": {"_id": "$company", "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
     cursor = db.jobs.aggregate(pipeline)
-    return [doc["_id"] async for doc in cursor if doc["_id"]]
+    return [
+        {"name": doc["_id"], "count": doc.get("count", 0)}
+        async for doc in cursor
+        if doc.get("_id")
+    ]
 
 
 async def find_job_by_id(job_id: str) -> dict[str, Any] | None:

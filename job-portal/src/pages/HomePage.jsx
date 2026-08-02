@@ -57,7 +57,6 @@ export default function HomePage() {
   useEffect(() => {
     fetchCompanies().then(setCompanies).catch(() => {});
   }, []);
-
   function handleSearch(e) {
     e.preventDefault();
     const params = new URLSearchParams();
@@ -180,19 +179,27 @@ export default function HomePage() {
               Popular companies
             </p>
             <div className="flex flex-wrap justify-center gap-2">
-              {companies.map((name, i) => (
+              {companies.slice(0, 5).map((company, i) => (
                 <button
-                  key={name}
-                  onClick={() => handleCompanyClick(name)}
+                  key={company.name}
+                  onClick={() => handleCompanyClick(company.name)}
                   className="rounded-full border border-border bg-white/70 px-4 py-1.5 text-sm font-medium text-ink-secondary shadow-sm backdrop-blur-sm transition-all hover:border-accent-300 hover:bg-accent-50/80 hover:text-accent-600 hover:shadow-md active:scale-95"
                   style={{
                     animation: `fade-in-up 0.4s ease-out ${0.7 + i * 0.05}s both`,
                   }}
                 >
-                  {name}
+                  {company.name}
                 </button>
               ))}
             </div>
+            <p className="mt-4 text-center">
+              <button
+                onClick={() => navigate('/companies')}
+                className="text-sm font-semibold text-accent-600 transition-colors hover:text-accent-700"
+              >
+                View all companies →
+              </button>
+            </p>
           </AnimatedSection>
         </div>
 

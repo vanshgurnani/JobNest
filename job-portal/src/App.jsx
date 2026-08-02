@@ -3,6 +3,7 @@ import Navbar from './components/Navbar';
 import HomePage from './pages/HomePage';
 import FindJobsPage from './pages/FindJobsPage';
 import JobDetailPage from './pages/JobDetailPage';
+import CompaniesPage from './pages/CompaniesPage';
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
         <Route path="/" element={<HomePage />} />
         <Route path="/jobs" element={<FindJobsPage />} />
         <Route path="/job/:id" element={<JobDetailPage />} />
+        <Route path="/companies" element={<CompaniesPage />} />
       </Routes>
     </div>
   );

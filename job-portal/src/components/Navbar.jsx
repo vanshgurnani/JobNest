@@ -26,6 +26,12 @@ export default function Navbar() {
           >
             Find Jobs
           </Link>
+          <Link
+            to="/companies"
+            className={`btn-ghost text-sm ${location.pathname === '/companies' ? 'text-accent-600 bg-accent-50' : ''}`}
+          >
+            Companies
+          </Link>
         </nav>
       </div>
     </header>
