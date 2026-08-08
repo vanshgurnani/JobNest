@@ -57,6 +57,8 @@ _ALLOWED_ATS_DOMAINS = (
     "phenompeople.com",
 )
 
+_SUPPORTED_DIRECT_ATS_PLATFORMS = {"lever", "greenhouse", "workday", "phenom", "capgemini"}
+
 _CAREERS_URL_HINTS = (
     "/careers",
     "/jobs",
@@ -192,7 +194,20 @@ def _looks_like_json_api_url(url: str) -> bool:
         return True
     if path.endswith((".json", "/json")):
         return True
-    api_terms = ("/api/", "/graphql", "/rest/", "/wday/cxs/", "/posting-api/", "/requisitions")
+    if re.search(r"\bformat=json\b|\bjson=1\b|\bjson=true\b", query):
+        return True
+    api_terms = (
+        "/api/",
+        "/graphql",
+        "/rest/",
+        "/wday/cxs/",
+        "/posting-api/",
+        "/requisitions",
+        "/jss/",
+        "/jsonapi/",
+        "/wp-json/",
+        "/_next/data/",
+    )
     return any(term in path for term in api_terms) or any(term.strip("/") in query for term in api_terms)
 
 
@@ -524,7 +539,13 @@ async def _first_fetchable_careers_candidate(
     return "", None
 
 
-async def _resolve_careers_page(*, company_name: str, company_url: str | None, client: httpx.AsyncClient | None = None) -> tuple[str, str]:
+async def _resolve_careers_page(
+    *,
+    company_name: str,
+    company_url: str | None,
+    client: httpx.AsyncClient | None = None,
+    ignore_known_urls: bool = False,
+) -> tuple[str, str]:
     headers = _default_headers()
 
     if company_url:
@@ -579,9 +600,11 @@ async def _resolve_careers_page(*, company_name: str, company_url: str | None, c
     alias_target = _COMPANY_ALIASES.get(normalized_name) or _COMPANY_ALIASES.get(slug)
     if alias_target:
         logger.info("Company '%s' resolved via alias to '%s'", company_name, alias_target)
-        return await _resolve_careers_page(company_name=alias_target, company_url=None, client=client)
+        return await _resolve_careers_page(company_name=alias_target, company_url=None, client=client, ignore_known_urls=ignore_known_urls)
 
-    known_url = _KNOWN_COMPANY_CAREERS_URLS.get(normalized_name) or _KNOWN_COMPANY_CAREERS_URLS.get(slug)
+    known_url = None if ignore_known_urls else (
+        _KNOWN_COMPANY_CAREERS_URLS.get(normalized_name) or _KNOWN_COMPANY_CAREERS_URLS.get(slug)
+    )
     if known_url:
         known_base = known_url[:known_url.index("/", 8)] if known_url.startswith("http") and "/" in known_url[8:] else known_url
         return known_base, known_url
@@ -1806,7 +1829,7 @@ async def universal_crawl_jobs(
         )
 
         direct_ats = detect_ats(careers_url, "")
-        if direct_ats:
+        if isinstance(direct_ats, dict) and direct_ats.get("platform") in _SUPPORTED_DIRECT_ATS_PLATFORMS:
             try:
                 jobs = await crawl_ats_jobs(
                     direct_ats,
@@ -1817,9 +1840,22 @@ async def universal_crawl_jobs(
                     limit=limit,
                     client=client,
                 )
-                return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))[:limit]
+                if jobs:
+                    return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))[:limit]
+                logger.warning(
+                    "Direct ATS crawl returned no jobs for %s (%s); falling back to generic discovery",
+                    company_name,
+                    careers_url,
+                )
             except Exception as exc:
                 logger.warning("Direct ATS crawl failed for %s (%s): %s", company_name, careers_url, exc)
+        elif direct_ats:
+            platform_name = direct_ats.get("platform") if isinstance(direct_ats, dict) else str(direct_ats)
+            logger.info(
+                "Detected direct ATS platform '%s' for %s is not directly supported; falling back to generic discovery",
+                platform_name,
+                company_name,
+            )
 
         headers = _default_headers()
         await asyncio.sleep(0.15 + random.random() * 0.15)
@@ -1867,21 +1903,47 @@ async def universal_crawl_jobs(
         except Exception as exc:
             logger.warning("Universal crawler could not fetch careers page for %s (%s): %s", company_name, careers_url, exc)
             ats = detect_ats(careers_url, "")
-            if not ats:
-                return []
+            if ats:
+                try:
+                    jobs = await crawl_ats_jobs(
+                        ats,
+                        company=company_name,
+                        keyword=keyword,
+                        location=location,
+                        page=page,
+                        limit=limit,
+                        client=client,
+                    )
+                    if jobs:
+                        return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))[:limit]
+                except Exception as ats_exc:
+                    logger.warning("ATS direct fallback failed for %s (%s): %s", company_name, careers_url, ats_exc)
+
+            # If the seeded or explicit careers URL fails, try dynamic discovery again
             try:
-                jobs = await crawl_ats_jobs(
-                    ats,
-                    company=company_name,
-                    keyword=keyword,
-                    location=location,
-                    page=page,
-                    limit=limit,
+                fallback_base, fallback_careers_url = await _resolve_careers_page(
+                    company_name=company_name,
+                    company_url=None,
                     client=client,
+                    ignore_known_urls=True,
                 )
-                return _dedupe_jobs(_normalize_universal_output(jobs, company=company_name, careers_url=careers_url))[:limit]
-            except Exception as ats_exc:
-                logger.warning("ATS direct fallback failed for %s (%s): %s", company_name, careers_url, ats_exc)
+                if fallback_careers_url and fallback_careers_url != careers_url:
+                    logger.info(
+                        "Retrying careers discovery for %s using fallback resolved URL %s",
+                        company_name,
+                        fallback_careers_url,
+                    )
+                    company_base_url, careers_url = fallback_base, fallback_careers_url
+                    fetch_url = careers_url
+                    html = await _fetch_html(fetch_url, headers=headers, client=client)
+                else:
+                    return []
+            except Exception as fallback_exc:
+                logger.warning(
+                    "Dynamic fallback discovery failed for %s: %s",
+                    company_name,
+                    fallback_exc,
+                )
                 return []
 
         try:

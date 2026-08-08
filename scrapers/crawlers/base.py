@@ -352,6 +352,69 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
     if smart_match:
         return {"platform": "smartrecruiters", "token": next(group for group in smart_match.groups() if group)}
 
+    bamboo_match = re.search(
+        r'https?://([^./]+)\.bamboohr\.com/(?:jobs|career|careers|jobsearch|api)(?:/|$)',
+        searchable,
+    )
+    if bamboo_match:
+        return {"platform": "bamboohr", "token": bamboo_match.group(1)}
+
+    icims_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.icims\.com/(?:jobs|careers|search|discover|api)(?:/|$)',
+        searchable,
+    )
+    if icims_match:
+        return {"platform": "icims", "token": icims_match.group(1)}
+
+    jobvite_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.jobvite\.com/([^/?#\s"\']*)',
+        searchable,
+    )
+    if jobvite_match:
+        return {"platform": "jobvite", "token": jobvite_match.group(1)}
+
+    jazzhr_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.jazzhr\.com/(?:jobs|job|career|career-page)(?:/|$)',
+        searchable,
+    )
+    if jazzhr_match:
+        return {"platform": "jazzhr", "token": jazzhr_match.group(1)}
+
+    recruitee_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.recruitee\.com/(?:jobs|career|companies|department)(?:/|$)',
+        searchable,
+    )
+    if recruitee_match:
+        return {"platform": "recruitee", "token": recruitee_match.group(1)}
+
+    comeet_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.comeet\.com/(?:jobs|careers|career)(?:/|$)',
+        searchable,
+    )
+    if comeet_match:
+        return {"platform": "comeet", "token": comeet_match.group(1)}
+
+    teamtailor_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.teamtailor\.com/(?:jobs|career|company)(?:/|$)',
+        searchable,
+    )
+    if teamtailor_match:
+        return {"platform": "teamtailor", "token": teamtailor_match.group(1)}
+
+    freshteam_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.freshteam\.com/(?:jobs|careers|career)(?:/|$)',
+        searchable,
+    )
+    if freshteam_match:
+        return {"platform": "freshteam", "token": freshteam_match.group(1)}
+
+    pinboard_match = re.search(
+        r'https?://pinboard\.hq\.com/(?:careers|company|jobs)(?:/|$)',
+        searchable,
+    )
+    if pinboard_match:
+        return {"platform": "pinboard", "token": "pinboard"}
+
     oraclecloud_match = re.search(
         r'https?://([^./]+)\.fa\.([^/]+?)/hcmUI/CandidateExperience/en/sites/([^/?#\s"\']+)',
         searchable,
@@ -716,13 +779,41 @@ async def crawl_ats_jobs(
             # cookies carry into the POST below.
             try:
                 warm_url = f"https://{subdomain}.myworkdayjobs.com/en-US/{board}"
+                warm_headers = {
+                    "Accept": "text/html",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                    ),
+                }
                 if client is not None:
-                    await client.get(warm_url, headers={"Accept": "text/html"})
+                    await client.get(warm_url, headers=warm_headers)
                 else:
-                    await request_with_retries(warm_url, timeout=15.0)
+                    await request_with_retries(warm_url, headers=warm_headers, timeout=15.0)
             except Exception:
                 pass
-            data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
+
+            try:
+                data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
+            except Exception as workday_exc:
+                status_code = None
+                if isinstance(workday_exc.__cause__, httpx.HTTPStatusError):
+                    status_code = workday_exc.__cause__.response.status_code
+                if status_code == 422:
+                    logger.warning(
+                        "Workday CXS returned 422 for %s, retrying after refresh",
+                        company,
+                    )
+                    try:
+                        if client is not None:
+                            await client.get(search_url, headers=warm_headers)
+                        else:
+                            await request_with_retries(search_url, headers=warm_headers, timeout=15.0)
+                        data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
+                    except Exception as retry_exc:
+                        raise RuntimeError(f"Workday failed for {company}: {retry_exc}") from retry_exc
+                else:
+                    raise
             listings = data.get("jobPostings") if isinstance(data, dict) else None
             if isinstance(listings, list):
                 for raw_job in listings:
