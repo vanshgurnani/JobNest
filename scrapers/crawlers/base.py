@@ -273,6 +273,26 @@ async def _request_json_with_client(
     raise RuntimeError(str(last_error)) from last_error
 
 
+def _workday_board_path(url: str) -> str:
+    """Extract the Workday board path prefix (locale + board) from a careers URL.
+
+    Examples:
+      https://mycareer.hsbc.com/en_GB/external/SearchJobs/   -> /en_GB/external
+      https://apply.deloitte.com/en_US/careers/SearchJobs    -> /en_US/careers
+      https://apply.deloitte.com/en_US/careers/JobDetail/..  -> /en_US/careers
+
+    Returns "" when no Workday marker is present in the URL.
+    """
+    if not url:
+        return ""
+    path = urlparse(url).path
+    for marker in ("/PipelineDetail/", "/JobDetail/", "/SearchJobs", "/Search", "/Jobs", "/jobs"):
+        idx = path.lower().find(marker.lower())
+        if idx != -1:
+            return path[:idx].rstrip("/")
+    return ""
+
+
 def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
     searchable = f"{url}\n{html_content or ''}"
 
@@ -303,6 +323,25 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
         host_prefix = workday_match.group(1)
         tenant = host_prefix.split(".")[0]
         return {"platform": "workday", "subdomain": host_prefix, "tenant": tenant, "board": workday_match.group(2)}
+
+    # Workday on a custom domain (e.g. apply.deloitte.com, mycareer.hsbc.com).
+    # Classic sites expose /SearchJobs and /PipelineDetail/ paths; the newer
+    # experience uses /portalpacks/ assets and /careers/JobDetail/ paths.
+    if (
+        _workday_board_path(url)
+        or re.search(r"portalpacks|/wday/cxs/|wd-browser-id|CALYPSO_CSRF_TOKEN|PLAY_SESSION", searchable, re.IGNORECASE)
+    ):
+        host = urlparse(url).netloc.lower().removeprefix("www.")
+        board_path = _workday_board_path(url)
+        board = board_path.rstrip("/").split("/")[-1] if board_path else ""
+        return {
+            "platform": "workday",
+            "host": host,
+            "tenant": host.split(".")[0] if host else "",
+            "board": board,
+            "board_path": board_path,
+            "custom_domain": True,
+        }
 
     smart_match = re.search(
         r'https?://(?:www\.)?smartrecruiters\.com/([^/?#\s"\']+)|'
@@ -425,6 +464,118 @@ async def _crawl_phenom(
     return jobs
 
 
+async def _crawl_workday_html(
+    *,
+    host: str,
+    board_path: str,
+    company: str,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """Crawl a Workday career site hosted on a custom domain (e.g. apply.deloitte.com).
+
+    Custom-domain Workday tenants usually don't expose the myworkdayjobs.com CXS
+    JSON API, so we scrape the server-rendered search page and then the detail
+    pages (which carry JSON-LD) instead.
+    """
+    search_url = f"https://{host}{board_path}/SearchJobs"
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+    }
+
+    try:
+        html = await request_with_retries(search_url, headers=headers, timeout=20.0, client=client)
+    except Exception as e:
+        logger.error("Failed crawling Workday custom domain %s: %s", host, e)
+        raise RuntimeError(f"Workday custom domain failed for {company}: {e}") from e
+
+    from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
+
+    job_links: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for anchor in _extract_anchor_links(html):
+        href = anchor["href"]
+        text = anchor["text"]
+        if not href or not text:
+            continue
+        full_url = urljoin(search_url, href)
+        if not re.search(r"/(?:PipelineDetail|JobDetail)/", full_url, re.IGNORECASE):
+            continue
+        if full_url in seen:
+            continue
+        seen.add(full_url)
+        if not _looks_like_job_title(text, full_url):
+            continue
+        path = urlparse(full_url).path.rstrip("/")
+        last_seg = path.rsplit("/", 1)[-1] if path else ""
+        job_id = last_seg if last_seg.isdigit() else ""
+        job_links.append({
+            "title": text[:160],
+            "url": full_url,
+            "job_id": job_id,
+        })
+
+    if not job_links:
+        logger.warning("No Workday job links found on %s", search_url)
+        return []
+
+    per_page = limit or 20
+    start = max(page - 1, 0) * per_page
+    page_links = job_links[start:start + per_page]
+
+    jobs: list[dict[str, Any]] = []
+    for item in page_links:
+        desc, loc = "", ""
+        try:
+            detail_html = await request_with_retries(item["url"], headers=headers, timeout=15.0, client=client)
+            best: dict[str, Any] | None = None
+            best_len = 0
+            for ld in _extract_jsonld_jobpostings(detail_html):
+                parsed = _parse_jsonld_jobposting(ld)
+                if not parsed.get("title"):
+                    continue
+                desc_len = len(parsed.get("description") or "")
+                if best is None or desc_len > best_len:
+                    best, best_len = parsed, desc_len
+            if best:
+                desc = best.get("description") or ""
+                loc = best.get("location") or ""
+            if not desc:
+                meta_desc = re.search(
+                    r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']',
+                    detail_html,
+                    re.IGNORECASE,
+                )
+                if meta_desc:
+                    desc = _clean_text(meta_desc.group(1))
+        except Exception as exc:
+            logger.warning("Workday custom domain detail fetch failed (%s): %s", item["url"], exc)
+
+        normalized = normalize_job_payload({
+            "job_id": item["job_id"],
+            "title": item["title"],
+            "location": loc,
+            "description": desc,
+            "apply_url": item["url"],
+            "employment_type": "",
+            "experience": "",
+            "skills": [],
+        }, company, "workday")
+        if _matches_filter(normalized, keyword=keyword, location=location):
+            jobs.append(normalized)
+        await asyncio.sleep(0.05)
+
+    return jobs
+
+
 async def crawl_ats_jobs(
     ats_info: dict[str, str],
     company: str,
@@ -534,6 +685,19 @@ async def crawl_ats_jobs(
             raise RuntimeError(f"Ashby failed for {company}: {e}") from e
 
     elif platform == "workday":
+        if ats_info.get("custom_domain") and ats_info.get("host"):
+            jobs = await _crawl_workday_html(
+                host=ats_info["host"],
+                board_path=ats_info.get("board_path") or "",
+                company=company,
+                keyword=keyword,
+                location=location,
+                page=page,
+                limit=limit,
+                client=client,
+            )
+            return jobs
+
         subdomain = ats_info["subdomain"]
         tenant = ats_info.get("tenant") or subdomain.split(".")[0]
         board = ats_info["board"]

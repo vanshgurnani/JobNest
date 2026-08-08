@@ -9,7 +9,7 @@ _SEED_URLS: dict[str, str] = {
     "capgemini": "https://www.capgemini.com/in-en/careers/join-capgemini/job-search/",
     "cisco": "https://jobs.cisco.com",
     "cognizant": "https://careers.cognizant.com/global-en/jobs/",
-    "deloitte": "https://jobsindia.deloitte.com/search/?q=&locationsearch=India",
+    "deloitte": "https://apply.deloitte.com/en_US/careers/SearchJobs",
     "google": "https://www.google.com/about/careers/applications/jobs/results/",
     "ibm": "https://www.ibm.com/careers/search",
     "infosys": "https://career.infosys.com/joblist",
@@ -46,6 +46,7 @@ _SEED_URLS: dict[str, str] = {
     "goldman sachs": "https://www.goldmansachs.com/careers/",
     "northern trust": "https://careers.northerntrust.com/",
     "pwc": "https://www.pwc.com/gx/en/careers.html",
+    "hsbc": "https://www.hsbc.com/careers",
 }
 
 _SEED_ATS: dict[str, dict[str, Any]] = {
@@ -57,6 +58,8 @@ _SEED_ATS: dict[str, dict[str, Any]] = {
     "stripe": {"platform": "lever", "token": "stripe"},
     "barclays": {"platform": "workday", "subdomain": "barclays.wd3", "tenant": "barclays", "board": "External_Career_Site_Barclays"},
     "northern trust": {"platform": "workday", "subdomain": "ntrs.wd1", "tenant": "ntrs", "board": "northerntrust"},
+    "deloitte": {"platform": "workday", "host": "apply.deloitte.com", "tenant": "deloitte", "board": "careers", "board_path": "/en_US/careers", "custom_domain": True},
+    "hsbc": {"platform": "workday", "host": "mycareer.hsbc.com", "tenant": "hsbc", "board": "external", "board_path": "/en_GB/external", "custom_domain": True},
     "capgemini": {"platform": "capgemini", "api_url": "https://cg-jobstream-api.azurewebsites.net/api/job-search"},
 }
 

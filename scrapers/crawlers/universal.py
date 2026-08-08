@@ -538,6 +538,12 @@ async def _resolve_careers_page(*, company_name: str, company_url: str | None, c
         if any(company_host == domain or company_host.endswith("." + domain) for domain in _ALLOWED_ATS_DOMAINS):
             return company_base, company_base
 
+        # Custom-domain ATS portals (e.g. apply.deloitte.com, mycareer.hsbc.com)
+        # are detected from URL shape — keep them untouched instead of treating a
+        # single job-detail page as the careers landing page.
+        if detect_ats(company_base, ""):
+            return company_base, company_base
+
         try:
             html = await _fetch_html(company_base, headers=headers, client=client)
         except Exception as exc:
