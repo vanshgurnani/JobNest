@@ -3,14 +3,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 _client: AsyncIOMotorClient | None = None
-_db: AsyncIOMotorDatabase | None = None
+_db: Any = None
 
 
 async def connect_mongo() -> None:
@@ -30,7 +30,7 @@ async def close_mongo() -> None:
     _db = None
 
 
-def get_db() -> AsyncIOMotorDatabase:
+def get_db() -> Any:
     if _db is None:
         raise RuntimeError("MongoDB is not connected")
     return _db
@@ -41,6 +41,8 @@ async def _ensure_indexes() -> None:
     await db.jobs.create_index("id", unique=True)
     await db.jobs.create_index([("company", 1), ("crawled_at", -1)])
     await db.jobs.create_index("title")
+    await db.jobs.create_index([("title", "text"), ("skills", "text"), ("location", "text")])
+    await db.jobs.create_index("location")
 
 
 async def ping_mongo() -> dict[str, Any]:

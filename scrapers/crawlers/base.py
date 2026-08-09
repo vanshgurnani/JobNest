@@ -3,11 +3,55 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_MAX_CONNECTIONS = 50
+
+
+def build_client(
+    *,
+    timeout: float = 25.0,
+    max_connections: int = _DEFAULT_MAX_CONNECTIONS,
+    http2: bool = False,
+    headers: dict[str, str] | None = None,
+    max_retries: int = 2,
+) -> httpx.AsyncClient:
+    """Create a connection-pooled httpx client for reuse across many requests."""
+    limits = httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max(4, int(max_connections * 0.3)),
+    )
+    return httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        limits=limits,
+        http2=http2,
+        headers=headers,
+        transport=httpx.AsyncHTTPTransport(retries=max_retries),
+    )
+
+
+@asynccontextmanager
+async def shared_httpx_client(
+    *,
+    timeout: float = 25.0,
+    max_connections: int = _DEFAULT_MAX_CONNECTIONS,
+    http2: bool = False,
+    headers: dict[str, str] | None = None,
+):
+    """Context manager yielding one pooled client for a whole scrape task."""
+    async with build_client(
+        timeout=timeout,
+        max_connections=max_connections,
+        http2=http2,
+        headers=headers,
+    ) as client:
+        yield client
 
 
 def _clean_text(value: str | None) -> str:
@@ -34,6 +78,14 @@ def _looks_like_job_title(text: str, href: str) -> bool:
     if re.search(r'locale\s*=', href_lower) or re.search(r'language\s*=', href_lower):
         return False
 
+    job_path_patterns = [
+        "/job/", "/jobs/", "/position/", "/requisition/",
+        "/opening/", "/careers/job", "/careers/position",
+        "/detail/",
+    ]
+    if any(pattern in href_lower for pattern in job_path_patterns):
+        return True
+
     keywords = [
         "engineer", "developer", "program", "analyst", "scientist",
         "intern", "manager", "designer", "product", "support",
@@ -41,13 +93,11 @@ def _looks_like_job_title(text: str, href: str) -> bool:
         "associate", "director", "architect", "vp", "lead",
     ]
     if any(keyword in text_lower for keyword in keywords):
-        return True
-
-    job_path_patterns = [
-        "/job/", "/jobs/", "/position/", "/requisition/",
-        "/opening/", "/careers/job", "/careers/position",
-    ]
-    if any(pattern in href_lower for pattern in job_path_patterns):
+        word_count = len(text.split())
+        if word_count >= 3:
+            return True
+        if word_count < 3 and not any(p in href_lower for p in job_path_patterns):
+            return False
         return True
 
     return False
@@ -158,8 +208,6 @@ async def request_json_with_retries(
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
             await asyncio.sleep(min(2**attempt, 4))
-            if attempt < max_retries - 1:
-                await asyncio.sleep(min(2**attempt, 4))
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -222,13 +270,34 @@ async def _request_json_with_client(
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
             await asyncio.sleep(min(2**attempt, 4))
-            if attempt < max_retries - 1:
-                await asyncio.sleep(min(2**attempt, 4))
     raise RuntimeError(str(last_error)) from last_error
+
+
+def _workday_board_path(url: str) -> str:
+    """Extract the Workday board path prefix (locale + board) from a careers URL.
+
+    Examples:
+      https://mycareer.hsbc.com/en_GB/external/SearchJobs/   -> /en_GB/external
+      https://apply.deloitte.com/en_US/careers/SearchJobs    -> /en_US/careers
+      https://apply.deloitte.com/en_US/careers/JobDetail/..  -> /en_US/careers
+
+    Returns "" when no Workday marker is present in the URL.
+    """
+    if not url:
+        return ""
+    path = urlparse(url).path
+    for marker in ("/PipelineDetail/", "/JobDetail/", "/SearchJobs", "/Search", "/Jobs", "/jobs"):
+        idx = path.lower().find(marker.lower())
+        if idx != -1:
+            return path[:idx].rstrip("/")
+    return ""
 
 
 def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
     searchable = f"{url}\n{html_content or ''}"
+
+    if "phenompeople.com" in searchable or "data-ph-id" in searchable or re.search(r'cdn\.phenompeople\.com', searchable):
+        return {"platform": "phenom", "domain": url}
 
     lever_match = re.search(r'https?://jobs\.lever\.co/([^/?#\s"]+)', searchable)
     if lever_match:
@@ -255,6 +324,25 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
         tenant = host_prefix.split(".")[0]
         return {"platform": "workday", "subdomain": host_prefix, "tenant": tenant, "board": workday_match.group(2)}
 
+    # Workday on a custom domain (e.g. apply.deloitte.com, mycareer.hsbc.com).
+    # Classic sites expose /SearchJobs and /PipelineDetail/ paths; the newer
+    # experience uses /portalpacks/ assets and /careers/JobDetail/ paths.
+    if (
+        _workday_board_path(url)
+        or re.search(r"portalpacks|/wday/cxs/|wd-browser-id|CALYPSO_CSRF_TOKEN|PLAY_SESSION", searchable, re.IGNORECASE)
+    ):
+        host = urlparse(url).netloc.lower().removeprefix("www.")
+        board_path = _workday_board_path(url)
+        board = board_path.rstrip("/").split("/")[-1] if board_path else ""
+        return {
+            "platform": "workday",
+            "host": host,
+            "tenant": host.split(".")[0] if host else "",
+            "board": board,
+            "board_path": board_path,
+            "custom_domain": True,
+        }
+
     smart_match = re.search(
         r'https?://(?:www\.)?smartrecruiters\.com/([^/?#\s"\']+)|'
         r'https?://jobs\.smartrecruiters\.com/([^/?#\s"\']+)|'
@@ -263,6 +351,69 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
     )
     if smart_match:
         return {"platform": "smartrecruiters", "token": next(group for group in smart_match.groups() if group)}
+
+    bamboo_match = re.search(
+        r'https?://([^./]+)\.bamboohr\.com/(?:jobs|career|careers|jobsearch|api)(?:/|$)',
+        searchable,
+    )
+    if bamboo_match:
+        return {"platform": "bamboohr", "token": bamboo_match.group(1)}
+
+    icims_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.icims\.com/(?:jobs|careers|search|discover|api)(?:/|$)',
+        searchable,
+    )
+    if icims_match:
+        return {"platform": "icims", "token": icims_match.group(1)}
+
+    jobvite_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.jobvite\.com/([^/?#\s"\']*)',
+        searchable,
+    )
+    if jobvite_match:
+        return {"platform": "jobvite", "token": jobvite_match.group(1)}
+
+    jazzhr_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.jazzhr\.com/(?:jobs|job|career|career-page)(?:/|$)',
+        searchable,
+    )
+    if jazzhr_match:
+        return {"platform": "jazzhr", "token": jazzhr_match.group(1)}
+
+    recruitee_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.recruitee\.com/(?:jobs|career|companies|department)(?:/|$)',
+        searchable,
+    )
+    if recruitee_match:
+        return {"platform": "recruitee", "token": recruitee_match.group(1)}
+
+    comeet_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.comeet\.com/(?:jobs|careers|career)(?:/|$)',
+        searchable,
+    )
+    if comeet_match:
+        return {"platform": "comeet", "token": comeet_match.group(1)}
+
+    teamtailor_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.teamtailor\.com/(?:jobs|career|company)(?:/|$)',
+        searchable,
+    )
+    if teamtailor_match:
+        return {"platform": "teamtailor", "token": teamtailor_match.group(1)}
+
+    freshteam_match = re.search(
+        r'https?://(?:www\.)?([^./]+)\.freshteam\.com/(?:jobs|careers|career)(?:/|$)',
+        searchable,
+    )
+    if freshteam_match:
+        return {"platform": "freshteam", "token": freshteam_match.group(1)}
+
+    pinboard_match = re.search(
+        r'https?://pinboard\.hq\.com/(?:careers|company|jobs)(?:/|$)',
+        searchable,
+    )
+    if pinboard_match:
+        return {"platform": "pinboard", "token": "pinboard"}
 
     oraclecloud_match = re.search(
         r'https?://([^./]+)\.fa\.([^/]+?)/hcmUI/CandidateExperience/en/sites/([^/?#\s"\']+)',
@@ -277,6 +428,215 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
         }
 
     return None
+
+
+def _extract_root_domain(url: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+async def _crawl_phenom(
+    input_url: str,
+    company: str,
+    *,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+
+    if not input_url:
+        return jobs
+
+    root = _extract_root_domain(input_url)
+
+    # Collect job URLs from sitemaps
+    job_urls: list[str] = []
+    sitemap_candidates = [
+        f"{root}/sitemap_index.xml",
+        f"{root}/global/en/sitemap_index.xml",
+        f"{root}/sitemap1.xml",
+        f"{root}/global/en/sitemap1.xml",
+        f"{root}/sitemap2.xml",
+        f"{root}/global/en/sitemap2.xml",
+    ]
+
+    fetched_sitemaps: list[str] = []
+    for sm_url in sitemap_candidates:
+        try:
+            sm_html = await request_with_retries(sm_url, timeout=15)
+            if sm_html and "<loc>" in sm_html:
+                fetched_sitemaps.append(sm_html)
+                if "<sitemapindex" in sm_html:
+                    for m in re.finditer(r'<loc>([^<]+)</loc>', sm_html):
+                        sub = m.group(1).strip()
+                        try:
+                            sub_xml = await request_with_retries(sub, timeout=15)
+                            if sub_xml and "<loc>" in sub_xml:
+                                fetched_sitemaps.append(sub_xml)
+                        except Exception:
+                            continue
+        except Exception:
+            continue
+
+    for xml in fetched_sitemaps:
+        for m in re.finditer(r'<loc>([^<]+)</loc>', xml):
+            url = m.group(1).strip()
+            if "/job/" in url.lower():
+                job_urls.append(url)
+
+    if not job_urls:
+        return jobs
+
+    page_limit = limit or 20
+    start = max(page - 1, 0) * page_limit
+    batch = job_urls[start:start + page_limit]
+
+    for job_url in batch:
+        try:
+            html = await request_with_retries(job_url, timeout=15)
+            from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
+
+            jsonld_items = _extract_jsonld_jobpostings(html)
+            for item in jsonld_items:
+                parsed = _parse_jsonld_jobposting(item)
+                title = (parsed.get("title") or "").strip()
+                if not title:
+                    continue
+                normalized = normalize_job_payload({
+                    "job_id": parsed.get("job_id", ""),
+                    "title": title,
+                    "location": parsed.get("location", ""),
+                    "description": parsed.get("description", ""),
+                    "apply_url": job_url,
+                    "employment_type": parsed.get("employment_type", ""),
+                    "experience": "",
+                    "skills": [],
+                    "posted_date": parsed.get("posted_date", ""),
+                    "valid_through": parsed.get("valid_through", ""),
+                }, company, "phenom")
+                if _matches_filter(normalized, keyword=keyword, location=location):
+                    jobs.append(normalized)
+                    break
+        except Exception:
+            continue
+
+    return jobs
+
+
+async def _crawl_workday_html(
+    *,
+    host: str,
+    board_path: str,
+    company: str,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """Crawl a Workday career site hosted on a custom domain (e.g. apply.deloitte.com).
+
+    Custom-domain Workday tenants usually don't expose the myworkdayjobs.com CXS
+    JSON API, so we scrape the server-rendered search page and then the detail
+    pages (which carry JSON-LD) instead.
+    """
+    search_url = f"https://{host}{board_path}/SearchJobs"
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+    }
+
+    try:
+        html = await request_with_retries(search_url, headers=headers, timeout=20.0, client=client)
+    except Exception as e:
+        logger.error("Failed crawling Workday custom domain %s: %s", host, e)
+        raise RuntimeError(f"Workday custom domain failed for {company}: {e}") from e
+
+    from scrapers.crawlers.universal import _extract_jsonld_jobpostings, _parse_jsonld_jobposting
+
+    job_links: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for anchor in _extract_anchor_links(html):
+        href = anchor["href"]
+        text = anchor["text"]
+        if not href or not text:
+            continue
+        full_url = urljoin(search_url, href)
+        if not re.search(r"/(?:PipelineDetail|JobDetail)/", full_url, re.IGNORECASE):
+            continue
+        if full_url in seen:
+            continue
+        seen.add(full_url)
+        if not _looks_like_job_title(text, full_url):
+            continue
+        path = urlparse(full_url).path.rstrip("/")
+        last_seg = path.rsplit("/", 1)[-1] if path else ""
+        job_id = last_seg if last_seg.isdigit() else ""
+        job_links.append({
+            "title": text[:160],
+            "url": full_url,
+            "job_id": job_id,
+        })
+
+    if not job_links:
+        logger.warning("No Workday job links found on %s", search_url)
+        return []
+
+    per_page = limit or 20
+    start = max(page - 1, 0) * per_page
+    page_links = job_links[start:start + per_page]
+
+    jobs: list[dict[str, Any]] = []
+    for item in page_links:
+        desc, loc = "", ""
+        try:
+            detail_html = await request_with_retries(item["url"], headers=headers, timeout=15.0, client=client)
+            best: dict[str, Any] | None = None
+            best_len = 0
+            for ld in _extract_jsonld_jobpostings(detail_html):
+                parsed = _parse_jsonld_jobposting(ld)
+                if not parsed.get("title"):
+                    continue
+                desc_len = len(parsed.get("description") or "")
+                if best is None or desc_len > best_len:
+                    best, best_len = parsed, desc_len
+            if best:
+                desc = best.get("description") or ""
+                loc = best.get("location") or ""
+            if not desc:
+                meta_desc = re.search(
+                    r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']',
+                    detail_html,
+                    re.IGNORECASE,
+                )
+                if meta_desc:
+                    desc = _clean_text(meta_desc.group(1))
+        except Exception as exc:
+            logger.warning("Workday custom domain detail fetch failed (%s): %s", item["url"], exc)
+
+        normalized = normalize_job_payload({
+            "job_id": item["job_id"],
+            "title": item["title"],
+            "location": loc,
+            "description": desc,
+            "apply_url": item["url"],
+            "employment_type": "",
+            "experience": "",
+            "skills": [],
+        }, company, "workday")
+        if _matches_filter(normalized, keyword=keyword, location=location):
+            jobs.append(normalized)
+        await asyncio.sleep(0.05)
+
+    return jobs
 
 
 async def crawl_ats_jobs(
@@ -325,6 +685,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Lever for %s: %s", company, e)
+            raise RuntimeError(f"Lever failed for {company}: {e}") from e
 
     elif platform == "greenhouse":
         token = ats_info["token"]
@@ -354,6 +715,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Greenhouse for %s: %s", company, e)
+            raise RuntimeError(f"Greenhouse failed for {company}: {e}") from e
 
     elif platform == "ashby":
         token = ats_info["token"]
@@ -383,8 +745,22 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Ashby for %s: %s", company, e)
+            raise RuntimeError(f"Ashby failed for {company}: {e}") from e
 
     elif platform == "workday":
+        if ats_info.get("custom_domain") and ats_info.get("host"):
+            jobs = await _crawl_workday_html(
+                host=ats_info["host"],
+                board_path=ats_info.get("board_path") or "",
+                company=company,
+                keyword=keyword,
+                location=location,
+                page=page,
+                limit=limit,
+                client=client,
+            )
+            return jobs
+
         subdomain = ats_info["subdomain"]
         tenant = ats_info.get("tenant") or subdomain.split(".")[0]
         board = ats_info["board"]
@@ -398,7 +774,46 @@ async def crawl_ats_jobs(
                 "searchText": keyword or "",
             }
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
-            data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
+            # Workday CXS returns 422 Unprocessable Entity unless a session cookie is
+            # established first. Warm it by GETting a board page via the same client so
+            # cookies carry into the POST below.
+            try:
+                warm_url = f"https://{subdomain}.myworkdayjobs.com/en-US/{board}"
+                warm_headers = {
+                    "Accept": "text/html",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                    ),
+                }
+                if client is not None:
+                    await client.get(warm_url, headers=warm_headers)
+                else:
+                    await request_with_retries(warm_url, headers=warm_headers, timeout=15.0)
+            except Exception:
+                pass
+
+            try:
+                data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
+            except Exception as workday_exc:
+                status_code = None
+                if isinstance(workday_exc.__cause__, httpx.HTTPStatusError):
+                    status_code = workday_exc.__cause__.response.status_code
+                if status_code == 422:
+                    logger.warning(
+                        "Workday CXS returned 422 for %s, retrying after refresh",
+                        company,
+                    )
+                    try:
+                        if client is not None:
+                            await client.get(search_url, headers=warm_headers)
+                        else:
+                            await request_with_retries(search_url, headers=warm_headers, timeout=15.0)
+                        data = await _rjr(search_url, method="POST", json_data=payload, headers=headers)
+                    except Exception as retry_exc:
+                        raise RuntimeError(f"Workday failed for {company}: {retry_exc}") from retry_exc
+                else:
+                    raise
             listings = data.get("jobPostings") if isinstance(data, dict) else None
             if isinstance(listings, list):
                 for raw_job in listings:
@@ -457,6 +872,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Workday for %s: %s", company, e)
+            raise RuntimeError(f"Workday failed for {company}: {e}") from e
 
     elif platform == "smartrecruiters":
         token = ats_info["token"]
@@ -504,6 +920,7 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling SmartRecruiters for %s: %s", company, e)
+            raise RuntimeError(f"SmartRecruiters failed for {company}: {e}") from e
 
     elif platform == "oraclecloud":
         domain = ats_info["domain"]
@@ -569,6 +986,43 @@ async def crawl_ats_jobs(
                         jobs.append(normalized)
         except Exception as e:
             logger.error("Failed crawling Oracle Cloud for %s: %s", company, e)
+            raise RuntimeError(f"Oracle Cloud failed for {company}: {e}") from e
+
+    elif platform == "phenom":
+        domain = ats_info.get("domain", "")
+        jobs = await _crawl_phenom(domain, company, keyword=keyword, location=location, page=page, limit=limit, client=client)
+
+    elif platform == "capgemini":
+        api_url = ats_info.get("api_url", "https://cg-jobstream-api.azurewebsites.net/api/job-search")
+        try:
+            params: dict[str, Any] = {"page": page, "size": max(limit, 1)}
+            if keyword:
+                params["search"] = keyword
+            if location:
+                params["country_code"] = location
+            if client is not None:
+                resp = await client.get(api_url, params=params)
+            else:
+                resp = await request_with_retries(api_url, params=params, timeout=30.0)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Capgemini API returned HTTP {resp.status_code}")
+            data = resp.json().get("data") or []
+            for raw in data:
+                normalized = normalize_job_payload({
+                    "job_id": raw.get("id") or raw.get("ref") or raw.get("hash"),
+                    "title": raw.get("title"),
+                    "location": raw.get("location") or raw.get("country_name"),
+                    "description": raw.get("description_stripped"),
+                    "apply_url": raw.get("apply_job_url"),
+                    "employment_type": raw.get("contract_type"),
+                    "experience": raw.get("experience_level"),
+                    "department": raw.get("department") or raw.get("sbu"),
+                }, company, "capgemini")
+                if _matches_filter(normalized, keyword=keyword, location=location):
+                    jobs.append(normalized)
+        except Exception as e:
+            logger.error("Failed crawling Capgemini for %s: %s", company, e)
+            raise RuntimeError(f"Capgemini failed for {company}: {e}") from e
 
     return _slice_page(jobs, page=page, limit=limit) if platform != "workday" else jobs
 
@@ -576,7 +1030,7 @@ async def crawl_ats_jobs(
 def _coerce_string(value: Any) -> str:
     if isinstance(value, str):
         return _clean_text(value)
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     return ""
 
@@ -605,9 +1059,33 @@ def _find_value(mapping: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+_LOCATION_VALUE_RE = re.compile(
+    r"^(?:Multiple\s+Cities|Remote|Anywhere|Various|Worldwide|Global|TBD)$"
+    r"|^.+(?:,\s*[A-Z]{2,}(?:\s*[A-Z]+)?)$",
+    re.IGNORECASE,
+)
+
+def _flexible_key_search(raw_job: dict[str, Any], *patterns: str) -> str | None:
+    for key, val in raw_job.items():
+        if isinstance(val, str) and val.strip():
+            for pat in patterns:
+                if pat in key.lower():
+                    return val.strip()
+    return None
+
+def _value_location_search(raw_job: dict[str, Any]) -> str | None:
+    for val in raw_job.values():
+        if isinstance(val, str) and val.strip() and _LOCATION_VALUE_RE.match(val.strip()):
+            return val.strip()
+    return None
+
 def normalize_job_payload(raw_job: dict[str, Any], company: str, source: str) -> dict[str, Any]:
     title = _coerce_string(_find_value(raw_job, "title", "job_title", "jobTitle", "name", "role", "jobName"))
-    location = _coerce_string(_find_value(raw_job, "location", "job_location", "jobLocation", "city", "workLocation"))
+    location = _coerce_string(_find_value(raw_job, "location", "location_string", "job_location", "jobLocation", "city", "workLocation"))
+    if not location:
+        location = _coerce_string(_flexible_key_search(raw_job, "location", "city", "country"))
+    if not location:
+        location = _coerce_string(_value_location_search(raw_job))
     description = _coerce_string(_find_value(raw_job, "description", "summary", "snippet", "content", "details"))
     requirements = _coerce_string(_find_value(raw_job, "requirements", "requirement"))
     if description and requirements:
@@ -616,9 +1094,13 @@ def normalize_job_payload(raw_job: dict[str, Any], company: str, source: str) ->
         description = requirements
 
     job_id = _coerce_string(_find_value(raw_job, "job_id", "jobId", "id", "jobNumber", "positionId"))
-    apply_url = _coerce_string(_find_value(raw_job, "apply_url", "applyUrl", "apply_link", "applyLink", "url", "link"))
-    employment_type = _coerce_string(_find_value(raw_job, "employment_type", "employmentType", "type", "workType"))
+    apply_url = _coerce_string(_find_value(raw_job, "apply_url", "applyUrl", "apply_link", "applyLink", "url", "link", "absolute_url"))
+    employment_type = _coerce_string(_find_value(raw_job, "employment_type", "employmentType", "type", "workType", "time_type"))
+    if not employment_type:
+        employment_type = _coerce_string(_flexible_key_search(raw_job, "employment", "work_type", "time_type"))
     experience = _coerce_string(_find_value(raw_job, "experience", "experience_level", "experienceLevel", "level"))
+    if not experience:
+        experience = _coerce_string(_flexible_key_search(raw_job, "experience", "seniority", "level"))
     team = _coerce_string(_find_value(raw_job, "team", "business_area", "businessArea", "department", "category"))
     if team and description:
         description = f"{description}\n\nTeam: {team}" if team not in description else description
@@ -656,6 +1138,7 @@ def collect_job_candidates(payload: Any) -> list[dict[str, Any]]:
 def extract_jobs_from_html(html: str, *, company: str, base_url: str, location_hint: str = "") -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     seen: set[str] = set()
+    base_domain = urlparse(base_url).netloc.lower()
     for anchor in _extract_anchor_links(html):
         href = anchor["href"]
         text = anchor["text"]
@@ -664,6 +1147,9 @@ def extract_jobs_from_html(html: str, *, company: str, base_url: str, location_h
         if not _looks_like_job_title(text, href):
             continue
         full_url = urljoin(base_url, href)
+        link_domain = urlparse(full_url).netloc.lower()
+        if link_domain and link_domain != base_domain:
+            continue
         title = text[:120].rstrip()
         normalized_title = title.lower()
         if normalized_title in seen:

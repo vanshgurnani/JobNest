@@ -11,13 +11,12 @@ Environment variables:
 """
 from dotenv import load_dotenv
 load_dotenv()
-import asyncio
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import MongoClient
 from app.schemas.job import canonicalize_job
 
 SOURCE_URI = os.getenv("SOURCE_MONGO_URI") or os.getenv("MONGODB_URI", "")
@@ -26,42 +25,42 @@ TARGET_URI = os.getenv("TARGET_MONGO_URI") or os.getenv("PROD_MONGO_URI", "")
 TARGET_DB = os.getenv("TARGET_MONGO_DB") or os.getenv("PROD_MONGO_DB", "job_intelligence")
 
 
-async def migrate():
+def migrate():
     if not SOURCE_URI:
         raise SystemExit("Set SOURCE_MONGO_URI (or MONGODB_URI) env var.")
     if not TARGET_URI:
         raise SystemExit("Set TARGET_MONGO_URI (or PROD_MONGO_URI) env var.")
 
-    src_client = AsyncIOMotorClient(SOURCE_URI, serverSelectionTimeoutMS=10000)
-    tgt_client = AsyncIOMotorClient(TARGET_URI, serverSelectionTimeoutMS=10000)
+    src_client = MongoClient(SOURCE_URI, serverSelectionTimeoutMS=10000)
+    tgt_client = MongoClient(TARGET_URI, serverSelectionTimeoutMS=10000)
 
-    await src_client.admin.command("ping")
-    await tgt_client.admin.command("ping")
+    src_client.admin.command("ping")
+    tgt_client.admin.command("ping")
 
     src_coll = src_client[SOURCE_DB]["jobs"]
     tgt_coll = tgt_client[TARGET_DB]["jobs"]
 
-    total = await src_coll.count_documents({})
+    total = src_coll.count_documents({})
     print(f"Source: {total} jobs from {SOURCE_DB}")
     print(f"Target: {TARGET_DB}")
 
     cursor = src_coll.find({})
     inserted = 0
     batch: list[dict] = []
-    async for doc in cursor:
+    for doc in cursor:
         doc.pop("_id", None)
         job = canonicalize_job(doc)
         batch.append(job)
         if len(batch) >= 100:
             for j in batch:
-                await tgt_coll.update_one({"id": j["id"]}, {"$set": j}, upsert=True)
+                tgt_coll.update_one({"id": j["id"]}, {"$set": j}, upsert=True)
             inserted += len(batch)
             print(f"  Migrated {inserted}/{total}...")
             batch = []
 
     if batch:
         for j in batch:
-            await tgt_coll.update_one({"id": j["id"]}, {"$set": j}, upsert=True)
+            tgt_coll.update_one({"id": j["id"]}, {"$set": j}, upsert=True)
         inserted += len(batch)
 
     src_client.close()
@@ -70,4 +69,4 @@ async def migrate():
 
 
 if __name__ == "__main__":
-    asyncio.run(migrate())
+    migrate()

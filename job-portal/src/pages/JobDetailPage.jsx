@@ -3,17 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { fetchJobById } from '../services/api';
 import { cleanDescription } from '../utils/text';
 
-function timeAgo(dateStr) {
-  if (!dateStr) return null;
-  const date = new Date(dateStr);
-  if (isNaN(date.getTime())) return null;
-  const diff = Math.floor((Date.now() - date) / 1000);
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
-  return `${Math.floor(diff / 2592000)}mo ago`;
-}
+import timeAgo from '../utils/timeAgo';
 
 export default function JobDetailPage() {
   const { id } = useParams();
@@ -25,12 +15,17 @@ export default function JobDetailPage() {
   useEffect(() => {
     setLoading(true);
     setError(null);
+    logger.info('JobDetailPage', `Fetching job ${id}`);
     fetchJobById(id)
       .then((data) => {
         if (!data) throw new Error('Job not found');
+        logger.info('JobDetailPage', `Loaded job "${data.title}" (${data.company})`);
         setJob(data);
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => {
+        logger.error('JobDetailPage', `Failed to load job ${id}: ${err.message}`);
+        setError(err.message);
+      })
       .finally(() => setLoading(false));
   }, [id]);
 
@@ -48,10 +43,12 @@ export default function JobDetailPage() {
       const next = stored.filter((s) => s !== jid);
       localStorage.setItem('savedJobs', JSON.stringify(next));
       setSaved(false);
+      logger.info('JobDetailPage', `Unsaved job ${jid}`);
     } else {
       stored.push(jid);
       localStorage.setItem('savedJobs', JSON.stringify(stored));
       setSaved(true);
+      logger.info('JobDetailPage', `Saved job ${jid}`);
     }
   }
 

@@ -1,6 +1,12 @@
+import hashlib
 import html
 import re
 from typing import Any
+
+
+def _stable_job_id(title: str, location: str, source: str, company: str) -> str:
+    seed = f"{company.lower()}:{title}:{location}:{source}"
+    return hashlib.sha256(seed.encode()).hexdigest()[:20]
 
 
 def _clean_html(text: str) -> str:
@@ -52,7 +58,7 @@ def normalize_job(raw_job: dict[str, Any], company: str, source: str) -> dict[st
     )
 
     return {
-        "id": raw_job.get("id") or f"{company.lower()}-{abs(hash(title + location + source))}",
+        "id": raw_job.get("id") or _stable_job_id(title, location, source, company),
         "company": company.title(),
         "title": title,
         "location": location,

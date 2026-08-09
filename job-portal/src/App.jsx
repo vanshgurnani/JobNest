@@ -1,5 +1,7 @@
-import { Routes, Route } from 'react-router-dom';
+import { lazy, Suspense, useEffect } from 'react';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import Navbar from './components/Navbar';
+import ErrorBoundary from './components/ErrorBoundary';
 import HomePage from './pages/HomePage';
 import FindJobsPage from './pages/FindJobsPage';
 import JobDetailPage from './pages/JobDetailPage';

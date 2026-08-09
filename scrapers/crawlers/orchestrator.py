@@ -1,42 +1,17 @@
 from __future__ import annotations
-import json
 import logging
-from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+
+import httpx
 
 from app.services.ai_parser import parse_job_details
+from scrapers.utils import company_name_from_url, supported_companies
 
 logger = logging.getLogger(__name__)
 
 
 def _company_name_from_url(company_url: str) -> str:
-    parsed = urlparse(company_url if company_url.startswith("http") else f"https://{company_url}")
-    host = parsed.netloc.lower().removeprefix("www.")
-    labels = [label for label in host.split(".") if label and label not in {"careers", "jobs", "apply"}]
-    if not labels:
-        return "company"
-    return labels[0].replace("-", " ")
-
-
-def supported_companies() -> list[str]:
-    _path = Path(__file__).resolve().parent.parent / "company_urls.json"
-    companies: list[str] = []
-    if _path.exists():
-        try:
-            raw = json.loads(_path.read_text(encoding="utf-8"))
-            for key in raw:
-                if not key.startswith("_"):
-                    companies.append(key)
-        except Exception:
-            pass
-    if not companies:
-        companies = [
-            "accenture", "amazon", "apple", "cisco", "cognizant", "deloitte",
-            "google", "hcl", "ibm", "infosys", "jpmorgan", "kpmg",
-            "mastercard", "meta", "microsoft", "oracle", "tcs", "wipro", "zoho",
-        ]
-    return companies
+    return company_name_from_url(company_url)
 
 
 def _enrich_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -59,6 +34,8 @@ async def _crawl_universal(
     location: Optional[str],
     page: int,
     limit: int,
+    use_playwright: bool = False,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     from scrapers.crawlers.universal import universal_crawl_jobs
 
@@ -70,6 +47,8 @@ async def _crawl_universal(
             location=location,
             page=page,
             limit=limit,
+            use_playwright=use_playwright,
+            client=client,
         )
         return {"company": company_name.title(), "status": "ok", "jobs": _enrich_jobs(jobs)}
     except Exception as exc:
@@ -84,6 +63,8 @@ async def crawl_jobs(
     location: Optional[str] = None,
     page: int = 1,
     limit: int = 20,
+    use_playwright: bool = False,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     name = company or (_company_name_from_url(company_url) if company_url else "unknown")
 
@@ -95,5 +76,7 @@ async def crawl_jobs(
             location=location,
             page=page,
             limit=limit,
+            use_playwright=use_playwright,
+            client=client,
         )
     ]
