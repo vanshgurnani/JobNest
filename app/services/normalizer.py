@@ -1,4 +1,5 @@
 import hashlib
+import html
 import re
 from typing import Any
 
@@ -10,6 +11,23 @@ def _stable_job_id(title: str, location: str, source: str, company: str) -> str:
 
 def _clean_html(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).strip()
+
+
+def html_to_text(raw: str | None) -> str:
+    """Convert HTML job descriptions into readable plain text."""
+    if not raw:
+        return ""
+    text = str(raw)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|h[1-6]|li|ul|ol|tr|blockquote|section|article|header|footer)>", "\n", text)
+    text = re.sub(r"(?i)<li[^>]*>", "\n• ", text)
+    text = re.sub(r"(?i)<(p|div|h[1-6]|tr|section|article|header|footer)[^>]*>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text).replace("\xa0", " ")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def normalize_job(raw_job: dict[str, Any], company: str, source: str) -> dict[str, Any]:

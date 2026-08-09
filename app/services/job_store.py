@@ -11,6 +11,7 @@ from pymongo.errors import BulkWriteError
 from app.config import get_settings
 from app.db.mongo import get_db
 from app.schemas.job import canonicalize_job
+from app.services.normalizer import html_to_text
 
 
 _MAX_INPUT_LENGTH = 200
@@ -35,6 +36,8 @@ def _serialize_job(job: dict[str, Any]) -> dict[str, Any]:
     crawled_at = serialized.get("crawled_at")
     if isinstance(crawled_at, datetime):
         serialized["crawled_at"] = crawled_at.isoformat()
+    if serialized.get("description"):
+        serialized["description"] = html_to_text(serialized["description"])
     return serialized
 
 
@@ -126,14 +129,18 @@ async def find_jobs(
     return jobs, total
 
 
-async def find_companies() -> list[str]:
+async def find_companies() -> list[dict[str, Any]]:
     db = get_db()
     pipeline = [
-        {"$group": {"_id": "$company"}},
+        {"$group": {"_id": "$company", "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
     cursor = db.jobs.aggregate(pipeline)
-    return [doc["_id"] async for doc in cursor if doc["_id"]]
+    return [
+        {"name": doc["_id"], "count": doc.get("count", 0)}
+        async for doc in cursor
+        if doc.get("_id")
+    ]
 
 
 async def find_job_by_id(job_id: str) -> dict[str, Any] | None:

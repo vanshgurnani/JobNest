@@ -70,7 +70,11 @@ export async function fetchHealth() {
 
 export async function fetchCompanies() {
   const data = await request('/companies');
-  return data.companies || [];
+  const raw = data.companies || data.companies_list || [];
+  return raw.map((c) => {
+    if (typeof c === 'string') return { name: c, count: null };
+    return { name: c.name || c.company, count: c.count ?? null };
+  });
 }
 
 export async function pushJobsToDb(jobs) {
