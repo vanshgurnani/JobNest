@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { fetchJobById } from '../services/api';
+import logger from '../utils/logger';
 import { cleanDescription } from '../utils/text';
 
 import timeAgo from '../utils/timeAgo';

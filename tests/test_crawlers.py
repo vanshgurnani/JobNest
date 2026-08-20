@@ -58,6 +58,26 @@ def test_detect_ats_supports_multilevel_workday_host() -> None:
     }
 
 
+def test_detect_ats_supports_eightfold_vanity_host() -> None:
+    ats = detect_ats(
+        "https://jobs.twilio.com/careers?start=0&pid=1099555572151&sort_by=timestamp",
+        "<html>Powered by eightfold.ai</html>",
+    )
+
+    assert ats == {
+        "platform": "eightfold",
+        "host": "jobs.twilio.com",
+        "domain": "twilio.com",
+    }
+
+
+def test_detect_ats_detects_eightfold_from_html_marker() -> None:
+    ats = detect_ats("https://careers.acme.com/careers", '<link href="https://static.vscdn.net/fonts/a.css">')
+
+    assert ats is not None
+    assert ats["platform"] == "eightfold"
+
+
 def test_universal_rejects_unofficial_job_boards() -> None:
     assert _is_unofficial_job_board("https://www.indeed.com/cmp/acme/jobs")
     assert not _is_unofficial_job_board("https://careers.acme.com/jobs")

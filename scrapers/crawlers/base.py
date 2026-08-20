@@ -273,6 +273,37 @@ async def _request_json_with_client(
     raise RuntimeError(str(last_error)) from last_error
 
 
+def _eightfold_domain(url: str, html_content: str = "") -> str | None:
+    """Resolve the Eightfold tenant domain used as the `domain` API param.
+
+    Vanity hosts (e.g. jobs.twilio.com) are registered against a brand domain
+    (twilio.com). Derive it from the host when possible, else from embedded
+    page JSON, else fall back to the registrable domain via tldextract.
+    """
+    if not url:
+        return None
+
+    host = urlparse(url).netloc.lower()
+    cands = re.findall(r'"domain"\s*:\s*"?([a-z0-9][a-z0-9.-]+\.[a-z]{2,})"?', html_content or "")
+    for cand in cands:
+        if "." in cand and not cand.startswith("."):
+            return cand
+
+    subdomain_match = re.search(r'^([^.]+)\.([a-z0-9-]+)\.[a-z]{2,}$', host)
+    if subdomain_match and subdomain_match.group(1) in ("jobs", "careers", "career", "talent", "apply"):
+        return f"{subdomain_match.group(2)}.{host.rsplit('.', 1)[-1]}"
+
+    try:
+        import tldextract
+        ext = tldextract.extract(host)
+        if ext.domain and ext.suffix:
+            return f"{ext.domain}.{ext.suffix}"
+    except Exception:
+        pass
+
+    return None
+
+
 def _workday_board_path(url: str) -> str:
     """Extract the Workday board path prefix (locale + board) from a careers URL.
 
@@ -298,6 +329,18 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, str] | None:
 
     if "phenompeople.com" in searchable or "data-ph-id" in searchable or re.search(r'cdn\.phenompeople\.com', searchable):
         return {"platform": "phenom", "domain": url}
+
+    # Eightfold / PCSX careers board (e.g. jobs.twilio.com, some *.eightfold.ai hosts).
+    if (
+        re.search(r'eightfold\.ai|eightfold\.co|static\.vscdn\.net|api/pcsx', searchable, re.IGNORECASE)
+        or ("/careers" in url and "pid=" in url and "start=" in url)
+    ):
+        host = (urlparse(url).netloc or "").lower()
+        return {
+            "platform": "eightfold",
+            "host": host,
+            "domain": _eightfold_domain(url, html_content),
+        }
 
     lever_match = re.search(r'https?://jobs\.lever\.co/([^/?#\s"]+)', searchable)
     if lever_match:
@@ -523,6 +566,115 @@ async def _crawl_phenom(
                     break
         except Exception:
             continue
+
+    return jobs
+
+
+async def _crawl_eightfold(
+    ats_info: dict[str, Any],
+    company: str,
+    *,
+    keyword: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """Crawl an Eightfold / PCSX careers board (e.g. jobs.twilio.com).
+
+    Eightfold tenants expose two JSON APIs:
+      * SmartApply legacy:  GET /api/apply/v2/jobs?domain={domain}&start={n}&num={n}
+      * PCSX (newer):       GET /api/pcsx/search?domain={domain}&start={n}&num={n}
+    Listings omit descriptions; each job's full HTML description is fetched from
+    the PCSX position_details endpoint.
+    """
+    host = ats_info.get("host") or ""
+    domain = ats_info.get("domain") or _eightfold_domain(host or "")
+    if not host or not domain:
+        logger.warning("Eightfold crawler requires host, but got %r", ats_info)
+        return []
+
+    if "://" not in host:
+        host = f"https://{host}"
+    host = host.rstrip("/")
+
+    page_limit = limit or 20
+    start = max(page - 1, 0) * page_limit
+    search_params = {
+        "domain": domain,
+        "location": "",
+        "query": keyword or "",
+        "pid": ats_info.get("pid", ""),
+        "start": start,
+        "num": page_limit,
+        "sort_by": ats_info.get("sort_by", "timestamp"),
+    }
+    headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+    jobs: list[dict[str, Any]] = []
+
+    try:
+        search_url = f"{host}/api/pcsx/search"
+        data = await request_json_with_retries(search_url, params=search_params, headers=headers, timeout=25.0, client=client)
+    except Exception as e:
+        logger.warning("Eightfold listings failed via PCSX for %s: %s", company, e)
+        raise RuntimeError(f"Eightfold (PCSX) failed for {company}: {e}") from e
+
+    payload = data.get("data") if isinstance(data, dict) else None
+    positions = payload.get("positions") if isinstance(payload, dict) else None
+    if not isinstance(positions, list):
+        logger.warning("Eightfold returned no positions for %s", company)
+        return []
+
+    for raw_job in positions:
+        pos_id = str(raw_job.get("id") or "")
+        title = raw_job.get("name") or ""
+        loc_raw = raw_job.get("locations") or []
+        locations = ", ".join(loc_raw) if isinstance(loc_raw, list) else str(loc_raw or "")
+        department = raw_job.get("department") or ""
+        position_path = raw_job.get("positionUrl") or ""
+        apply_url = f"{host}{position_path}" if position_path.startswith("/") else (position_path or "")
+
+        desc = ""
+        if pos_id:
+            try:
+                detail_url = f"{host}/api/pcsx/position_details"
+                detail = await request_json_with_retries(
+                    detail_url,
+                    params={"position_id": pos_id, "domain": domain},
+                    headers=headers,
+                    timeout=20.0,
+                    client=client,
+                )
+                detail_data = detail.get("data") if isinstance(detail, dict) else None
+                if isinstance(detail_data, dict):
+                    desc = detail_data.get("jobDescription") or ""
+                    create_ts = detail_data.get("creationTs") or 0
+                    if not locations and detail_data.get("locations"):
+                        loc_list = detail_data["locations"]
+                        locations = ", ".join(loc_list) if isinstance(loc_list, list) else str(loc_list)
+                    if not title:
+                        title = detail_data.get("name") or ""
+            except Exception as de:
+                logger.warning("Eightfold detail fetch failed for %s %s: %s", company, pos_id, de)
+
+        from bs4 import BeautifulSoup as _BS
+        if desc:
+            plain = _BS(desc, "lxml").get_text(" ", strip=True)
+            desc = f"{desc}\n\n{plain}" if plain and plain not in desc else desc
+
+        normalized = normalize_job_payload({
+            "job_id": pos_id,
+            "title": title,
+            "location": locations,
+            "description": desc,
+            "apply_url": apply_url,
+            "employment_type": "",
+            "experience": "",
+            "skills": [],
+        }, company, "eightfold")
+        if _matches_filter(normalized, keyword=keyword, location=location):
+            jobs.append(normalized)
+        await asyncio.sleep(0.05)
 
     return jobs
 
@@ -991,6 +1143,17 @@ async def crawl_ats_jobs(
     elif platform == "phenom":
         domain = ats_info.get("domain", "")
         jobs = await _crawl_phenom(domain, company, keyword=keyword, location=location, page=page, limit=limit, client=client)
+
+    elif platform == "eightfold":
+        jobs = await _crawl_eightfold(
+            ats_info,
+            company,
+            keyword=keyword,
+            location=location,
+            page=page,
+            limit=limit,
+            client=client,
+        )
 
     elif platform == "capgemini":
         api_url = ats_info.get("api_url", "https://cg-jobstream-api.azurewebsites.net/api/job-search")

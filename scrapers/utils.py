@@ -97,7 +97,14 @@ def detect_ats(url: str, html_content: str = "") -> dict[str, Any] | str | None:
         "ukg": r"ukg\.com|ultimatesoftware\.com",
         "adp": r"adp\.com",
         "phenom": r"phenompeople\.com|campion\.com|phenom\.com",
+        "eightfold": r"eightfold\.ai|eightfold\.co|static\.vscdn\.net|api/pcsx|pcsx\/search",
     }
+
+    # Vanity-host Eightfold boards (e.g. jobs.twilio.com/careers?start=0&pid=...
+    # &sort_by=timestamp) don't carry an *.eightfold.ai URL component. The Eightfold
+    # PCSX board signature is the `pid=` portal-id query param on a /careers path.
+    if "/careers" in url_lower and "pid=" in url_lower and "start=" in url_lower:
+        return "eightfold"
 
     for name, pat in patterns.items():
         if re.search(pat, url_lower, re.IGNORECASE):
