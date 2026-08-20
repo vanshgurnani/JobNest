@@ -24,6 +24,7 @@ _SEED_URLS: dict[str, str] = {
     "sap": "https://www.sap.com/careers.html",
     "techmahindra": "https://careers.techmahindra.com/",
     "tcs": "https://www.tcs.com/careers",
+    "twilio": "https://jobs.twilio.com/careers",
     "wipro": "https://careers.wipro.com/viewalljobs/?locale=en_US",
     "zoho": "https://www.zoho.com/careers/",
     "adobe": "https://adobe.wd5.myworkdayjobs.com/external_experienced",
@@ -61,6 +62,7 @@ _SEED_ATS: dict[str, dict[str, Any]] = {
     "deloitte": {"platform": "workday", "host": "apply.deloitte.com", "tenant": "deloitte", "board": "careers", "board_path": "/en_US/careers", "custom_domain": True},
     "hsbc": {"platform": "workday", "host": "mycareer.hsbc.com", "tenant": "hsbc", "board": "external", "board_path": "/en_GB/external", "custom_domain": True},
     "capgemini": {"platform": "capgemini", "api_url": "https://cg-jobstream-api.azurewebsites.net/api/job-search"},
+    "twilio": {"platform": "eightfold", "host": "https://jobs.twilio.com", "domain": "twilio.com", "pid": "1099555572151", "sort_by": "timestamp"},
 }
 
 _SEED_ALIASES: dict[str, str] = {
