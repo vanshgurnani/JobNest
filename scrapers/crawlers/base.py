@@ -8,6 +8,8 @@ from typing import Any
 from urllib.parse import urlencode, urljoin, urlparse
 import httpx
 
+from scrapers.crawlers.rate_limit import domain_rate_limiter
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CONNECTIONS = 50
@@ -137,8 +139,24 @@ def _extract_anchor_links(html: str) -> list[dict[str, str]]:
 
 def _is_client_error(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
-        return 400 <= exc.response.status_code < 500
+        # 408 and 429 are transient and should consume the bounded retry
+        # budget; authentication and other client errors should fail fast.
+        return 400 <= exc.response.status_code < 500 and exc.response.status_code not in (408, 429)
     return False
+
+
+async def _limited_request(client: httpx.AsyncClient, url: str, *, method: str = "GET",
+                           params: dict[str, Any] | None = None,
+                           headers: dict[str, str] | None = None,
+                           json_data: Any | None = None,
+                           data: Any | None = None) -> httpx.Response:
+    await domain_rate_limiter.acquire(url)
+    try:
+        if method.upper() == "POST":
+            return await client.post(url, params=params, headers=headers, json=json_data, data=data)
+        return await client.get(url, params=params, headers=headers)
+    finally:
+        domain_rate_limiter.release(url)
 
 
 async def request_with_retries(
@@ -161,9 +179,9 @@ async def request_with_retries(
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 if method.upper() == "POST":
-                    response = await c.post(url, params=params, headers=headers, json=json_data, data=data)
+                    response = await _limited_request(c, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
                 else:
-                    response = await c.get(url, params=params, headers=headers)
+                    response = await _limited_request(c, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
                 response.raise_for_status()
                 return response.text
         except Exception as exc:
@@ -196,9 +214,9 @@ async def request_json_with_retries(
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 if method.upper() == "POST":
-                    response = await c.post(url, params=params, headers=headers, json=json_data, data=data)
+                    response = await _limited_request(c, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
                 else:
-                    response = await c.get(url, params=params, headers=headers)
+                    response = await _limited_request(c, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
                 response.raise_for_status()
                 return response.json()
         except Exception as exc:
@@ -227,9 +245,9 @@ async def _request_with_client(
     for attempt in range(max_retries):
         try:
             if method.upper() == "POST":
-                response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+                response = await _limited_request(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
             else:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _limited_request(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
             response.raise_for_status()
             return response.text
         except Exception as exc:
@@ -258,9 +276,9 @@ async def _request_json_with_client(
     for attempt in range(max_retries):
         try:
             if method.upper() == "POST":
-                response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+                response = await _limited_request(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
             else:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _limited_request(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data)
             response.raise_for_status()
             return response.json()
         except Exception as exc:

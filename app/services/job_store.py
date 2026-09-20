@@ -51,6 +51,9 @@ def _build_filter(
     fresh_only: bool = False,
 ) -> dict[str, Any]:
     query: dict[str, Any] = {}
+    # Legacy documents without the field remain active; explicitly removed
+    # jobs are hidden from the product search surface.
+    query["active"] = {"$ne": False}
     company = _validate_search_input(company, "Company")
     keyword = _validate_search_input(keyword, "Keyword")
     location = _validate_search_input(location, "Location")
@@ -147,3 +150,20 @@ async def find_job_by_id(job_id: str) -> dict[str, Any] | None:
     db = get_db()
     job = await db.jobs.find_one({"$or": [{"id": job_id}, {"job_id": job_id}]})
     return _serialize_job(job) if job else None
+
+
+async def mark_removed_jobs(*, company: str, seen_ids: set[str], portal: str = "") -> int:
+    """Mark jobs absent from a successful crawl as inactive.
+
+    Callers should only invoke this after a non-degraded crawl. Keeping this
+    operation explicit prevents a temporary 403/empty response from expiring
+    an entire company's inventory.
+    """
+    db = get_db()
+    query: dict[str, Any] = {"company": {"$regex": f"^{re.escape(company)}$", "$options": "i"}, "active": {"$ne": False}}
+    if portal:
+        query["portal"] = portal
+    if seen_ids:
+        query["id"] = {"$nin": list(seen_ids)}
+    result = await db.jobs.update_many(query, {"$set": {"active": False, "removed_at": _now()}})
+    return int(result.modified_count)

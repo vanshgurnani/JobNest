@@ -345,20 +345,20 @@ def _parse_jsonld_jobposting(job: dict[str, Any]) -> dict[str, Any]:
 
 def _dedupe_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
-    seen_normalized: set[str] = set()
     out: list[dict[str, Any]] = []
     for j in jobs:
-        job_id = (j.get("job_id") or "").strip()
-        url = (j.get("url") or j.get("apply_url") or "").strip()
-        title = (j.get("title") or "").strip().lower()
-        title_norm = re.sub(r"[\s\-–—/\\,;&#x2013;]+", " ", title).strip()
-        location = (j.get("location") or "").strip().lower()
-        key = f"{j.get('company','').strip().lower()}|{job_id or url or title + '|' + location}"
-        norm_key = f"{j.get('company','').strip().lower()}|{title_norm}"
-        if not key or key in seen or norm_key in seen_normalized:
+        from scrapers.crawlers.normalization import canonicalize_url, normalize_text
+
+        company = normalize_text(j.get("company")).lower()
+        provider = normalize_text(j.get("portal") or j.get("source") or "unknown").lower()
+        job_id = normalize_text(j.get("source_job_id") or j.get("job_id"))
+        url = canonicalize_url(j.get("canonical_url") or j.get("url") or j.get("apply_url"))
+        title = re.sub(r"[\s\-–—/\\,;&]+", " ", normalize_text(j.get("title")).lower()).strip()
+        location = re.sub(r"[\s,]+", " ", normalize_text(j.get("location")).lower()).strip()
+        key = f"{provider}|{job_id}" if job_id else (url or f"{company}|{title}|{location}")
+        if not key or key in seen:
             continue
         seen.add(key)
-        seen_normalized.add(norm_key)
         if not j.get("url") and j.get("apply_url"):
             j["url"] = j.get("apply_url")
         out.append(j)

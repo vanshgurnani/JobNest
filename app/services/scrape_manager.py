@@ -25,13 +25,40 @@ class ScrapeTask:
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     def to_dict(self) -> dict[str, Any]:
+        preview_jobs: list[dict[str, Any]] = []
+        for result in self.results:
+            for job in result.get("jobs", [])[:5]:
+                if isinstance(job, dict):
+                    preview_jobs.append({
+                        "id": job.get("id") or job.get("job_id", ""),
+                        "job_id": job.get("job_id", ""),
+                        "title": job.get("title", ""),
+                        "company": job.get("company") or result.get("target", ""),
+                        "location": job.get("location", ""),
+                        "apply_url": job.get("apply_url") or job.get("url", ""),
+                        "portal": job.get("portal") or job.get("source", ""),
+                        "description": job.get("description", ""),
+                    })
+                if len(preview_jobs) >= 5:
+                    break
+            if len(preview_jobs) >= 5:
+                break
         return {
             "task_id": self.task_id,
+            "target": self.config.get("companies") or self.config.get("company_url") or "all supported companies",
+            "mode": "db" if self.config.get("save_to_db") else "local",
+            "config": {
+                "pages": self.config.get("pages", 2),
+                "page_size": self.config.get("page_size", 20),
+                "delay_seconds": self.config.get("delay_seconds", 0.5),
+                "concurrency": self.config.get("concurrency", 1),
+            },
             "status": self.status,
             "progress": self.progress,
             "message": self.message,
             "total": self.total,
             "results": self.results,
+            "preview_jobs": preview_jobs[:5],
             "error": self.error,
         }
 
@@ -56,6 +83,10 @@ class ScrapeManager:
 
     def get(self, task_id: str) -> ScrapeTask | None:
         return self._tasks.get(task_id)
+
+    def list(self) -> list[dict[str, Any]]:
+        """Return bounded in-process history for the scraper control center."""
+        return [task.to_dict() for task in reversed(list(self._tasks.values()))]
 
     async def start(self, config: dict[str, Any]) -> str:
         self.cleanup_old()

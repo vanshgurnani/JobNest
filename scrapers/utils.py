@@ -4,7 +4,10 @@ import re
 from typing import Any
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
-import tldextract
+try:
+    import tldextract
+except ImportError:  # pragma: no cover - dependency is declared; fallback keeps CLI usable
+    tldextract = None
 from bs4 import BeautifulSoup
 
 _TRACKING_PARAMS = {
@@ -35,6 +38,12 @@ _GENERIC_TLDS = {
 
 
 def company_name_from_url(url: str) -> str:
+    if tldextract is None:
+        host = urlparse(url if "://" in url else f"https://{url}").netloc.split(":", 1)[0]
+        parts = [part for part in host.lower().split(".") if part and part != "www"]
+        name = parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+        return name.replace("-", " ").replace("_", " ").title()
+
     extracted = tldextract.extract(url)
     suffix = (extracted.suffix or "").lower()
     last_suffix = suffix.split(".")[-1]

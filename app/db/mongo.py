@@ -43,6 +43,17 @@ async def _ensure_indexes() -> None:
     await db.jobs.create_index("title")
     await db.jobs.create_index([("title", "text"), ("skills", "text"), ("location", "text")])
     await db.jobs.create_index("location")
+    await db.jobs.create_index([("source_job_id", 1), ("portal", 1)], sparse=True)
+    await db.jobs.create_index("canonical_url", sparse=True)
+    await db.jobs.create_index([("portal", 1), ("posted_at", -1)], sparse=True)
+    await db.jobs.create_index([("company", 1), ("active", 1)], sparse=True)
+    await db.companies.create_index("company_id", unique=True)
+    await db.companies.create_index("domain", sparse=True)
+    await db.crawl_runs.create_index("crawl_id", unique=True)
+    await db.crawl_runs.create_index([("company", 1), ("started_at", -1)])
+    await db.crawl_errors.create_index([("crawl_id", 1), ("created_at", -1)])
+    await db.raw_job_payloads.create_index([("crawl_id", 1), ("reference", 1)], unique=True)
+    await db.crawl_state.create_index("company_id", unique=True)
 
 
 async def ping_mongo() -> dict[str, Any]:

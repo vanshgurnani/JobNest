@@ -69,17 +69,142 @@ async def _validate_company_url(url: Optional[str]) -> Optional[str]:
     return url
 
 
+@router.post("/crawl")
+async def crawl_company(request: Request) -> dict:
+    """Run one discovery/detection/adapter crawl through the service boundary."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    company = str(body.get("company") or body.get("company_name") or "").strip() or None
+    target_url = str(body.get("company_url") or body.get("domain") or "").strip() or None
+    if not company and not target_url:
+        raise HTTPException(status_code=400, detail="company, domain, or company_url is required")
+    target_url = await _validate_company_url(target_url)
+    from scrapers.crawlers.base import shared_httpx_client
+    from scrapers.crawlers.orchestrator import CrawlOrchestrator
+
+    try:
+        async with shared_httpx_client(max_connections=12) as client:
+            result = await CrawlOrchestrator().crawl(
+                company=company,
+                company_url=target_url,
+                keyword=str(body.get("keyword") or "").strip() or None,
+                location=str(body.get("location") or "").strip() or None,
+                page=max(1, int(body.get("page", 1))),
+                limit=min(100, max(1, int(body.get("limit", 20)))),
+                use_playwright=bool(body.get("use_playwright", False)),
+                client=client,
+            )
+    except Exception as exc:
+        logger.exception("Crawl service failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Crawl service failed") from exc
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=502, detail=result.get("error", "Crawl failed"))
+    return result
+
+
+@router.post("/scraper/discover")
+async def discover_scraper_portal(request: Request) -> dict:
+    """Discover and inspect a portal without starting job ingestion."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    company = str(body.get("company") or body.get("company_name") or "").strip() or None
+    target_url = str(body.get("company_url") or body.get("domain") or "").strip() or None
+    if not company and not target_url:
+        raise HTTPException(status_code=400, detail="company, domain, or company_url is required")
+    target_url = await _validate_company_url(target_url)
+
+    from scrapers.crawlers.base import request_with_retries, shared_httpx_client
+    from scrapers.crawlers.detector import detect_portal
+    from scrapers.crawlers.discovery import CareerPageDiscovery
+
+    try:
+        async with shared_httpx_client(max_connections=8) as client:
+            discovery = await CareerPageDiscovery(client=client).discover(target_url or company or "")
+            html = ""
+            if discovery.careers_url:
+                try:
+                    html = await request_with_retries(discovery.careers_url, client=client, max_retries=2)
+                except Exception as exc:
+                    logger.warning("Portal inspection fetch failed for %s: %s", discovery.careers_url, exc)
+            detection = detect_portal(discovery.careers_url, html)
+            try:
+                from app.services.crawl_repository import save_company_profile
+                await save_company_profile({
+                    "company_id": discovery.company,
+                    "name": discovery.company,
+                    "domain": discovery.official_domain,
+                    "careers_url": discovery.careers_url,
+                    "career_url": discovery.careers_url,
+                    "career_page_url": discovery.careers_url,
+                    "portal_provider": detection.get("provider", "unknown"),
+                    "detection_confidence": detection.get("confidence", 0.0),
+                    "capabilities": detection.get("capabilities", []),
+                    "detection_signals": detection.get("signals", []),
+                    "crawl_status": "discovered",
+                })
+            except RuntimeError:
+                # Discovery is useful without MongoDB; persistence is best effort.
+                pass
+        return {"discovery": discovery.to_dict(), "detection": detection}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Portal discovery failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Portal discovery failed") from exc
+
+
 @router.get("/companies")
 async def get_companies() -> dict:
+    """Return the global company directory with career-page metadata."""
+    company_map: dict[str, dict[str, Any]] = {}
     try:
-        companies = await find_companies()
-        if not companies:
-            companies = [c.title() for c in supported_companies()]
+        job_companies = await find_companies()
+        for item in job_companies:
+            name = str(item.get("name") or item.get("_id") or "").strip()
+            if name:
+                company_map[name.lower()] = {"name": name, "count": item.get("count", 0)}
     except RuntimeError:
-        logger.warning("find_companies failed; falling back to supported_companies")
-        companies = [c.title() for c in supported_companies()]
-    logger.info("GET /companies returned %d companies", len(companies))
-    return {"companies": companies}
+        logger.warning("find_companies failed; using directory/profile fallback")
+
+    # Profiles discovered through the scraper are the most authoritative
+    # source for custom domains and manually confirmed career URLs.
+    try:
+        from app.db.mongo import get_db
+        profile_cursor = get_db().companies.find({}, {"_id": 0})
+        async for profile in profile_cursor:
+            name = str(profile.get("name") or profile.get("company") or "").strip()
+            if name:
+                key = name.lower()
+                company_map[key] = {**company_map.get(key, {}), **profile, "name": name}
+    except RuntimeError:
+        pass
+
+    # Seed metadata keeps the global directory useful before the first crawl
+    # and supplies official career URLs for known companies.
+    from scrapers.directory import ats_info, careers_url, companies as seeded_companies
+    for seed in seeded_companies():
+        key = seed.lower()
+        url = careers_url(seed) or ""
+        ats = ats_info(seed) or {}
+        current = company_map.get(key, {})
+        company_map[key] = {
+            **current,
+            "name": current.get("name") or seed.title(),
+            "count": current.get("count", 0),
+            "domain": current.get("domain") or (url.split("//", 1)[-1].split("/", 1)[0] if url else ""),
+            "career_url": current.get("career_url") or current.get("careers_url") or url,
+            "careers_url": current.get("careers_url") or current.get("career_url") or url,
+            "career_page_url": current.get("career_page_url") or current.get("careers_url") or current.get("career_url") or url,
+            "portal_provider": current.get("portal_provider") or ats.get("platform", "unknown"),
+            "detection_confidence": current.get("detection_confidence", 0.0),
+            "crawl_status": current.get("crawl_status", "not_crawled"),
+        }
+
+    companies = sorted(company_map.values(), key=lambda item: str(item.get("name", "")).lower())
+    logger.info("GET /companies returned %d companies with career metadata", len(companies))
+    return {"companies": companies, "total": len(companies)}
 
 
 async def _cache_response(key: str, payload: dict) -> dict:
@@ -350,6 +475,13 @@ async def scrape_status(task_id: str) -> dict:
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task.to_dict()
+
+
+@router.get("/scrape/status")
+async def scrape_history() -> dict:
+    from app.services.scrape_manager import manager
+    runs = manager.list()
+    return {"runs": runs, "count": len(runs)}
 
 
 @router.get("/scrape/events/{task_id}")
