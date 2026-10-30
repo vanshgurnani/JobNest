@@ -1,10 +1,23 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.5
-httpx==0.28.1
+httpx[http2]==0.28.1
 beautifulsoup4==4.13.3
 lxml==5.3.1
 motor==3.7.0
 pymongo==4.9.2
 pytest==8.3.4
 tldextract==5.3.1
+
+# Playwright — headless browser for JS-rendered SPA pages
+playwright==1.47.0
+
+# Celery task queue + Redis broker
+celery[redis]==5.4.0
+redis==5.0.8
+
+# Celery monitoring UI (optional, run with --profile monitoring)
+flower==2.0.1
+
+# Better retry logic (used by anti_bot)
+tenacity==8.3.0

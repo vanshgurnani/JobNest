@@ -66,7 +66,7 @@ async def crawl_jobs(
     use_playwright: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
-    name = company or (_company_name_from_url(company_url) if company_url else "unknown")
+    name = (company or (_company_name_from_url(company_url) if company_url else "unknown")).lower()
 
     return [
         await _crawl_universal(

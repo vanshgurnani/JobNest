@@ -32,6 +32,16 @@ export default function Navbar() {
           >
             Companies
           </Link>
+          <Link
+            to="/scraper"
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-semibold transition-all ${
+              location.pathname === '/scraper'
+                ? 'bg-accent-600 text-white shadow-sm'
+                : 'bg-accent-50 text-accent-700 hover:bg-accent-100'
+            }`}
+          >
+            <span>⚡ Auto Scraper</span>
+          </Link>
         </nav>
       </div>
     </header>

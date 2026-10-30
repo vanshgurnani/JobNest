@@ -211,6 +211,19 @@ export default function HomePage() {
                 View all companies →
               </button>
             </p>
+            <div className="mt-8 rounded-xl border border-accent-200/80 bg-white/80 p-4 shadow-sm backdrop-blur-sm flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
+              <div>
+                <span className="font-semibold text-ink text-sm">Need jobs from a specific company or careers link?</span>
+                <p className="text-xs text-ink-muted">Enter any company or careers URL — JobNest auto-discovers and ingests all active jobs.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/scraper')}
+                className="btn-primary text-xs py-2 px-4 shadow-sm whitespace-nowrap"
+              >
+                ⚡ Open Scraper Studio →
+              </button>
+            </div>
           </AnimatedSection>
         </div>
 

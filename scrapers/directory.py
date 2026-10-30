@@ -36,7 +36,7 @@ _SEED_URLS: dict[str, str] = {
     "vmware": "https://vmware.wd1.myworkdayjobs.com/VMware_Careers",
     "airbnb": "https://careers.airbnb.com/",
     "datadog": "https://careers.datadoghq.com/",
-    "shopify": "https://www.shopify.com/careers",
+    "shopify": "https://www.shopify.com/careers/search",
     "stripe": "https://stripe.com/jobs",
     "gitlab": "https://about.gitlab.com/jobs/",
     "notion": "https://www.notion.so/careers",
@@ -52,11 +52,10 @@ _SEED_URLS: dict[str, str] = {
 
 _SEED_ATS: dict[str, dict[str, Any]] = {
     "airbnb": {"platform": "greenhouse", "token": "airbnb"},
-    "datadog": {"platform": "greenhouse", "token": "datadoghq"},
-    "shopify": {"platform": "greenhouse", "token": "shopify"},
+    "datadog": {"platform": "greenhouse", "token": "datadog"},
     "gitlab": {"platform": "greenhouse", "token": "gitlab"},
-    "notion": {"platform": "greenhouse", "token": "swissmadenatural"},
-    "stripe": {"platform": "lever", "token": "stripe"},
+    "notion": {"platform": "ashby", "token": "notion"},
+    "stripe": {"platform": "greenhouse", "token": "stripe"},
     "barclays": {"platform": "workday", "subdomain": "barclays.wd3", "tenant": "barclays", "board": "External_Career_Site_Barclays"},
     "northern trust": {"platform": "workday", "subdomain": "ntrs.wd1", "tenant": "ntrs", "board": "northerntrust"},
     "deloitte": {"platform": "workday", "host": "apply.deloitte.com", "tenant": "deloitte", "board": "careers", "board_path": "/en_US/careers", "custom_domain": True},

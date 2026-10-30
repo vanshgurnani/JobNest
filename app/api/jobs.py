@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -212,8 +214,14 @@ async def get_company_jobs(
 @router.post("/scrape")
 async def run_scrape(request: Request) -> dict:
     body = await request.json()
-    companies_str = (body.get("companies") or "").strip()
-    urls_str = (body.get("company_url") or "").strip()
+    raw_input = (body.get("input") or "").strip()
+    companies_str = (body.get("companies") or body.get("company") or "").strip()
+    urls_str = (body.get("company_url") or body.get("url") or "").strip()
+    if raw_input:
+        if raw_input.startswith("http://") or raw_input.startswith("https://"):
+            urls_str = raw_input if not urls_str else f"{urls_str},{raw_input}"
+        else:
+            companies_str = raw_input if not companies_str else f"{companies_str},{raw_input}"
     keyword = (body.get("keyword") or "").strip() or None
     location = (body.get("location") or "").strip() or None
     pages = int(body.get("pages", 2))
@@ -490,3 +498,159 @@ async def get_job_detail(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     return await _cache_response(cache_key, {"job": job, "cache": "mongo"})
+
+
+# ---------------------------------------------------------------------------
+# Scraper Health Dashboard
+# ---------------------------------------------------------------------------
+@router.get("/scraper-health")
+async def get_scraper_health() -> dict:
+    """
+    Return health records for all tracked scrapers.
+
+    Each record contains:
+      - target:               company name or URL
+      - status:               "healthy" | "degraded" | "failing"
+      - last_run:             ISO timestamp
+      - last_success:         ISO timestamp
+      - last_job_count:       int
+      - consecutive_failures: int
+      - last_error:           str | null
+      - ats_detected:         str | null
+    """
+    try:
+        from app.services.scraper_health import get_all_health
+        health = await get_all_health()
+        return {"count": len(health), "records": health}
+    except Exception as exc:
+        logger.warning("GET /scraper-health failed: %s", exc)
+        return {"count": 0, "records": [], "error": str(exc)}
+
+
+@router.get("/scraper-health/{target:path}")
+async def get_scraper_health_target(target: str) -> dict:
+    """Return health record for a specific company or URL."""
+    try:
+        from app.services.scraper_health import get_health
+        record = await get_health(target)
+        if not record:
+            raise HTTPException(status_code=404, detail=f"No health record for '{target}'")
+        return record
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Async scrape (Celery-queued) — fire and forget
+# ---------------------------------------------------------------------------
+@router.post("/scrape/async")
+async def run_scrape_async(request: Request) -> dict:
+    """
+    Queue a scrape job via Celery (returns task_id immediately).
+
+    Body:
+      {
+        "company": "google",          // name OR
+        "url": "https://...",         // URL
+        "keyword": "...",             // optional
+        "location": "...",            // optional
+        "pages": 2,                   // optional (default 2)
+        "page_size": 20,              // optional (default 20)
+        "save_to_db": true            // optional (default true)
+      }
+
+    Returns:
+      { "task_id": "...", "status": "queued" }
+    """
+    body = await request.json()
+    company = (body.get("company") or "").strip() or None
+    url = (body.get("url") or "").strip() or None
+    keyword = (body.get("keyword") or "").strip() or None
+    location = (body.get("location") or "").strip() or None
+    pages = int(body.get("pages", 2))
+    page_size = int(body.get("page_size", 20))
+    save_to_db = bool(body.get("save_to_db", True))
+
+    if not company and not url:
+        raise HTTPException(status_code=400, detail="Provide 'company' or 'url'")
+
+    if url:
+        safe, reason = await is_safe_url(url)
+        if not safe:
+            raise HTTPException(status_code=400, detail=f"Invalid URL: {reason}")
+
+    try:
+        from app.tasks.scrape import scrape_company_task
+        result = scrape_company_task.apply_async(
+            kwargs={
+                "company": company,
+                "url": url,
+                "keyword": keyword,
+                "location": location,
+                "pages": pages,
+                "page_size": page_size,
+                "save_to_db": save_to_db,
+            },
+            queue="scrape",
+        )
+        logger.info("POST /scrape/async queued task %s for company=%s url=%s", result.id, company, url)
+        return {
+            "task_id": result.id,
+            "status": "queued",
+            "target": url or company,
+        }
+    except Exception as exc:
+        logger.error("POST /scrape/async failed to queue task: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Task queue unavailable: {exc}")
+
+
+@router.get("/scrape/async/{task_id}")
+async def get_async_scrape_status(task_id: str) -> dict:
+    """
+    Check the status of a queued Celery scrape task.
+
+    Returns:
+      { "task_id": "...", "status": "PENDING|STARTED|SUCCESS|FAILURE|RETRY", "result": {...} | null }
+    """
+    try:
+        from celery_app import app as celery_app
+        result = celery_app.AsyncResult(task_id)
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "status": result.status,
+            "result": None,
+        }
+        if result.ready():
+            if result.successful():
+                payload["result"] = result.result
+            else:
+                payload["error"] = str(result.result)
+        return payload
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Celery unavailable: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Company resolver preview (dev/debug endpoint)
+# ---------------------------------------------------------------------------
+@router.post("/resolve-company")
+async def resolve_company(request: Request) -> dict:
+    """
+    Preview what the smart resolver would find for a company name or URL.
+
+    Body: { "input": "stripe" }  OR  { "input": "https://jobs.stripe.com" }
+    """
+    body = await request.json()
+    input_str = (body.get("input") or "").strip()
+    if not input_str:
+        raise HTTPException(status_code=400, detail="Provide 'input' field")
+
+    try:
+        from scrapers.resolver import resolve_company_input
+        result = await resolve_company_input(input_str)
+        return result
+    except Exception as exc:
+        logger.error("POST /resolve-company failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

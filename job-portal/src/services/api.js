@@ -91,3 +91,61 @@ export async function pushJobsToDb(jobs) {
   logger.info('api', `DB push complete: ${data.saved} saved`);
   return data.saved;
 }
+
+export async function triggerScrape({ input, keyword, location, pages = 2, saveToDb = true } = {}) {
+  const isUrl = input?.startsWith('http://') || input?.startsWith('https://');
+  const payload = {
+    keyword,
+    location,
+    pages,
+    save_to_db: saveToDb,
+  };
+  if (isUrl) {
+    payload.url = input;
+  } else {
+    payload.company = input;
+  }
+
+  return request('/scrape', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function triggerScrapeAsync({ input, keyword, location, pages = 2, saveToDb = true } = {}) {
+  const isUrl = input?.startsWith('http://') || input?.startsWith('https://');
+  const payload = {
+    keyword,
+    location,
+    pages,
+    save_to_db: saveToDb,
+  };
+  if (isUrl) {
+    payload.url = input;
+  } else {
+    payload.company = input;
+  }
+
+  return request('/scrape/async', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getScrapeStatus(taskId) {
+  return request(`/scrape/async/${encodeURIComponent(taskId)}`);
+}
+
+export async function fetchScraperHealth() {
+  return request('/scraper-health');
+}
+
+export async function resolveCompany(input) {
+  return request('/resolve-company', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input }),
+  });
+}

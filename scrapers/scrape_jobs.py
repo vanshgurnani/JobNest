@@ -609,19 +609,82 @@ async def _scrape_company(
     generic_only: bool = False,
     use_playwright: bool = False,
 ) -> list[dict[str, Any]]:
-    async with shared_httpx_client() as client:
-        return await _scrape_company_with_client(
-            company,
-            company_url=company_url,
-            keyword=keyword,
-            location=location,
-            pages=pages,
-            page_size=page_size,
-            delay_seconds=delay_seconds,
-            generic_only=generic_only,
-            use_playwright=use_playwright,
-            client=client,
-        )
+    # ── Smart Resolution ────────────────────────────────────────────────────
+    # If we have neither a seeded URL nor a known company, try the resolver
+    # to auto-discover the careers URL and detect ATS.
+    if not company_url and company:
+        try:
+            from scrapers.resolver import resolve_company_input
+            resolved = await resolve_company_input(company)
+            if resolved.get("careers_url") and not company_url:
+                company_url = resolved["careers_url"]
+                LOGGER.info(
+                    "[RESOLVER] '%s' → careers_url=%s (method=%s, ats=%s)",
+                    company,
+                    company_url,
+                    resolved.get("discovery_method"),
+                    (resolved.get("ats") or {}).get("platform"),
+                )
+        except Exception as resolve_err:
+            LOGGER.debug("[RESOLVER] Resolution failed for '%s': %s", company, resolve_err)
+
+    elif company_url and not company:
+        # URL given without name — extract company name and try ATS detection
+        try:
+            from scrapers.resolver import resolve_company_input
+            resolved = await resolve_company_input(company_url)
+            if not company:
+                company = resolved.get("company_name") or company_name_from_url(company_url)
+            LOGGER.info(
+                "[RESOLVER] URL '%s' → company=%s ats=%s",
+                company_url,
+                company,
+                (resolved.get("ats") or {}).get("platform"),
+            )
+        except Exception as resolve_err:
+            LOGGER.debug("[RESOLVER] URL resolution failed for '%s': %s", company_url, resolve_err)
+
+    target = company or company_url or "unknown"
+    ats_platform = None
+
+    # Check circuit breaker before attempting scrape
+    try:
+        from app.services.scraper_health import is_circuit_open
+        if await is_circuit_open(target):
+            LOGGER.warning("[CIRCUIT BREAKER] Circuit is OPEN for '%s' (too many consecutive failures). Skipping.", target)
+            return []
+    except Exception as cb_err:
+        LOGGER.debug("[CIRCUIT BREAKER] Check failed: %s", cb_err)
+
+    try:
+        async with shared_httpx_client() as client:
+            jobs = await _scrape_company_with_client(
+                company,
+                company_url=company_url,
+                keyword=keyword,
+                location=location,
+                pages=pages,
+                page_size=page_size,
+                delay_seconds=delay_seconds,
+                generic_only=generic_only,
+                use_playwright=use_playwright,
+                client=client,
+            )
+            # Record success / zero-jobs
+            try:
+                from app.services.scraper_health import record_scrape_result
+                await record_scrape_result(target, success=True, job_count=len(jobs), ats=ats_platform)
+            except Exception:
+                pass
+            return jobs
+    except Exception as exc:
+        # Record failure
+        try:
+            from app.services.scraper_health import record_scrape_result
+            await record_scrape_result(target, success=False, error=str(exc), ats=ats_platform)
+        except Exception:
+            pass
+        raise
 
 
 async def _scrape_company_with_client(
@@ -646,19 +709,23 @@ async def _scrape_company_with_client(
     _scraper: GenericScraper | None = None
     if use_playwright:
         LOGGER.info("[PLAYWRIGHT] Playwright mode enabled for '%s' — skipping routed scrapers", label)
-    elif company_url and not company:
-        if generic_only:
-            company_name = _company_name_from_url(company_url)
-            LOGGER.info("[INFO] Using scraper: generic (forced)")
-            _scraper = GenericScraper(company=company_name)
-        else:
-            _scraper = route_scraper(company_url)
-    elif company and not company_url:
-        from scrapers.directory import ats_info as dir_atts_info
-        info = dir_atts_info(company)
-        if info:
-            LOGGER.info("[DIRECTORY] Using ATS adapter '%s' for '%s'", info.get("platform"), company)
-            _scraper = _ATSScraper(info.get("platform"), company, ats_info=info)
+    else:
+        # 1. Prefer known ATS adapter for company name
+        if company and not generic_only:
+            from scrapers.directory import ats_info as dir_atts_info
+            info = dir_atts_info(company)
+            if info:
+                LOGGER.info("[DIRECTORY] Using ATS adapter '%s' for '%s'", info.get("platform"), company)
+                _scraper = _ATSScraper(info.get("platform"), company, ats_info=info)
+
+        # 2. If no company ATS adapter, route via careers URL
+        if _scraper is None and company_url:
+            if generic_only:
+                company_name = company or _company_name_from_url(company_url)
+                LOGGER.info("[INFO] Using scraper: generic (forced)")
+                _scraper = GenericScraper(company=company_name)
+            else:
+                _scraper = route_scraper(company_url)
 
     for page in range(1, pages + 1):
         LOGGER.info("[SCRAPE] Fetching target='%s' page=%d limit=%d", label, page, page_size)

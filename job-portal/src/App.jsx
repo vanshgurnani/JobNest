@@ -6,6 +6,7 @@ import HomePage from './pages/HomePage';
 import FindJobsPage from './pages/FindJobsPage';
 import JobDetailPage from './pages/JobDetailPage';
 import CompaniesPage from './pages/CompaniesPage';
+import ScraperStudioPage from './pages/ScraperStudioPage';
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
         <Route path="/jobs" element={<FindJobsPage />} />
         <Route path="/job/:id" element={<JobDetailPage />} />
         <Route path="/companies" element={<CompaniesPage />} />
+        <Route path="/scraper" element={<ScraperStudioPage />} />
       </Routes>
     </div>
   );

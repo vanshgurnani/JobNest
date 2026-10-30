@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # MongoDB Database Container
+  # ── MongoDB ──────────────────────────────────────────────────────────────
   mongodb:
     image: mongo:7.0
     container_name: job_mongo
@@ -19,7 +19,23 @@ services:
       retries: 5
       start_period: 5s
 
-  # FastAPI Web Backend Application
+  # ── Redis (Celery broker + result backend) ────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: job_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Web Backend ───────────────────────────────────────────────────
   web:
     build: .
     container_name: job_api
@@ -30,11 +46,73 @@ services:
       - MONGO_URI=mongodb://mongodb:27017/job_intelligence
       - MONGO_DB_NAME=job_intelligence
       - CORS_ORIGINS=*
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
     depends_on:
       mongodb:
         condition: service_healthy
+      redis:
+        condition: service_healthy
 
-  # Scraper Runner Container (Runs scraper in DB mode)
+  # ── Celery Worker (scrape tasks) ──────────────────────────────────────────
+  celery-worker:
+    build: .
+    container_name: job_celery_worker
+    restart: always
+    command: >
+      celery -A celery_app worker
+        --loglevel=info
+        --concurrency=4
+        -Q scrape,retry,default
+        --hostname=worker@%h
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/job_intelligence
+      - MONGO_DB_NAME=job_intelligence
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+  # ── Celery Beat (scheduler) ───────────────────────────────────────────────
+  celery-beat:
+    build: .
+    container_name: job_celery_beat
+    restart: always
+    command: celery -A celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/job_intelligence
+      - MONGO_DB_NAME=job_intelligence
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - celery_beat_data:/app/celerybeat-schedule
+
+  # ── Flower (Celery monitoring UI) ─────────────────────────────────────────
+  flower:
+    build: .
+    container_name: job_flower
+    restart: always
+    command: celery -A celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - monitoring
+
+  # ── One-shot scraper (manual / CI use) ───────────────────────────────────
   scraper:
     build: .
     container_name: job_scraper
@@ -50,4 +128,8 @@ services:
 
 volumes:
   mongo_data:
+    driver: local
+  redis_data:
+    driver: local
+  celery_beat_data:
     driver: local

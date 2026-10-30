@@ -8,6 +8,18 @@ from typing import Any
 from urllib.parse import urlencode, urljoin, urlparse
 import httpx
 
+from scrapers.crawlers.anti_bot import (
+    backoff_sleep,
+    browser_headers,
+    is_bot_blocked,
+    is_rate_limited,
+    is_retryable,
+    json_api_headers,
+    needs_playwright,
+    parse_retry_after,
+    random_user_agent,
+)
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CONNECTIONS = 50
@@ -150,29 +162,68 @@ async def request_with_retries(
     json_data: Any | None = None,
     data: Any | None = None,
     timeout: float = 20.0,
-    max_retries: int = 3,
+    max_retries: int = 4,
     client: httpx.AsyncClient | None = None,
+    use_playwright_fallback: bool = True,
 ) -> str:
     if client is not None:
-        return await _request_with_client(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data, timeout=timeout, max_retries=max_retries)
+        return await _request_with_client(
+            client, url, method=method, params=params, headers=headers,
+            json_data=json_data, data=data, timeout=timeout, max_retries=max_retries,
+            use_playwright_fallback=use_playwright_fallback,
+        )
+
+    # Merge caller-supplied headers on top of realistic browser defaults
+    merged_headers = browser_headers()
+    if headers:
+        merged_headers.update(headers)
 
     last_error: Exception | None = None
     for attempt in range(max_retries):
+        # Rotate UA on every retry
+        merged_headers["User-Agent"] = random_user_agent()
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 if method.upper() == "POST":
-                    response = await c.post(url, params=params, headers=headers, json=json_data, data=data)
+                    response = await c.post(url, params=params, headers=merged_headers, json=json_data, data=data)
                 else:
-                    response = await c.get(url, params=params, headers=headers)
+                    response = await c.get(url, params=params, headers=merged_headers)
+
+                # Handle rate-limiting explicitly
+                if is_rate_limited(response.status_code):
+                    wait = parse_retry_after(dict(response.headers)) or None
+                    logger.warning("Rate-limited (429) on %s — waiting before retry", url)
+                    await backoff_sleep(attempt + 1, base=3.0, cap=60.0) if wait is None else await asyncio.sleep(wait)
+                    continue
+
+                # Bot-block detection
+                if is_bot_blocked(response.status_code):
+                    logger.warning("Bot-block (%d) on %s — attempt %d", response.status_code, url, attempt + 1)
+                    await backoff_sleep(attempt, base=2.0, cap=20.0)
+                    continue
+
                 response.raise_for_status()
-                return response.text
+                html = response.text
+
+                # Auto-fallback to Playwright if we got a JS SPA shell
+                if use_playwright_fallback and needs_playwright(html, url=url):
+                    logger.info("SPA shell detected for %s — falling back to Playwright", url)
+                    try:
+                        from scrapers.crawlers.playwright_plus import fetch_page_html
+                        pw_html = await fetch_page_html(url, wait_for="networkidle", timeout_ms=30_000)
+                        if pw_html and len(pw_html) > len(html):
+                            return pw_html
+                    except Exception as pw_err:
+                        logger.warning("Playwright fallback failed for %s: %s", url, pw_err)
+
+                return html
         except Exception as exc:
             last_error = exc
             exc_msg = str(exc) or f"[{type(exc).__name__}]"
-            logger.warning("Request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            logger.warning("Request attempt %d/%d failed for %s: %s", attempt + 1, max_retries, url, exc_msg)
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
-            await asyncio.sleep(min(2**attempt, 4))
+            await backoff_sleep(attempt)
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -185,29 +236,50 @@ async def request_json_with_retries(
     json_data: Any | None = None,
     data: Any | None = None,
     timeout: float = 20.0,
-    max_retries: int = 3,
+    max_retries: int = 4,
     client: httpx.AsyncClient | None = None,
 ) -> Any:
     if client is not None:
-        return await _request_json_with_client(client, url, method=method, params=params, headers=headers, json_data=json_data, data=data, timeout=timeout, max_retries=max_retries)
+        return await _request_json_with_client(
+            client, url, method=method, params=params, headers=headers,
+            json_data=json_data, data=data, timeout=timeout, max_retries=max_retries,
+        )
+
+    # Use JSON-API headers but keep realistic UA
+    merged_headers = json_api_headers()
+    if headers:
+        merged_headers.update(headers)
 
     last_error: Exception | None = None
     for attempt in range(max_retries):
+        merged_headers["User-Agent"] = random_user_agent()
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 if method.upper() == "POST":
-                    response = await c.post(url, params=params, headers=headers, json=json_data, data=data)
+                    response = await c.post(url, params=params, headers=merged_headers, json=json_data, data=data)
                 else:
-                    response = await c.get(url, params=params, headers=headers)
+                    response = await c.get(url, params=params, headers=merged_headers)
+
+                if is_rate_limited(response.status_code):
+                    wait = parse_retry_after(dict(response.headers)) or None
+                    logger.warning("Rate-limited (429) on JSON request to %s", url)
+                    await backoff_sleep(attempt + 1, base=3.0, cap=60.0) if wait is None else await asyncio.sleep(wait)
+                    continue
+
+                if is_bot_blocked(response.status_code):
+                    logger.warning("Bot-block (%d) on JSON request to %s", response.status_code, url)
+                    await backoff_sleep(attempt, base=2.0, cap=20.0)
+                    continue
+
                 response.raise_for_status()
                 return response.json()
         except Exception as exc:
             last_error = exc
             exc_msg = str(exc) or f"[{type(exc).__name__}]"
-            logger.warning("JSON request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            logger.warning("JSON request attempt %d/%d failed for %s: %s", attempt + 1, max_retries, url, exc_msg)
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
-            await asyncio.sleep(min(2**attempt, 4))
+            await backoff_sleep(attempt)
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -221,24 +293,54 @@ async def _request_with_client(
     json_data: Any | None = None,
     data: Any | None = None,
     timeout: float = 20.0,
-    max_retries: int = 3,
+    max_retries: int = 4,
+    use_playwright_fallback: bool = True,
 ) -> str:
+    merged_headers = browser_headers()
+    if headers:
+        merged_headers.update(headers)
+
     last_error: Exception | None = None
     for attempt in range(max_retries):
+        merged_headers["User-Agent"] = random_user_agent()
         try:
             if method.upper() == "POST":
-                response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+                response = await client.post(url, params=params, headers=merged_headers, json=json_data, data=data)
             else:
-                response = await client.get(url, params=params, headers=headers)
+                response = await client.get(url, params=params, headers=merged_headers)
+
+            if is_rate_limited(response.status_code):
+                wait = parse_retry_after(dict(response.headers)) or None
+                logger.warning("Rate-limited (429) on %s", url)
+                await backoff_sleep(attempt + 1, base=3.0, cap=60.0) if wait is None else await asyncio.sleep(wait)
+                continue
+
+            if is_bot_blocked(response.status_code):
+                logger.warning("Bot-block (%d) on %s — attempt %d", response.status_code, url, attempt + 1)
+                await backoff_sleep(attempt, base=2.0, cap=20.0)
+                continue
+
             response.raise_for_status()
-            return response.text
+            html = response.text
+
+            if use_playwright_fallback and needs_playwright(html, url=url):
+                logger.info("SPA shell detected for %s — falling back to Playwright", url)
+                try:
+                    from scrapers.crawlers.playwright_plus import fetch_page_html
+                    pw_html = await fetch_page_html(url, wait_for="networkidle", timeout_ms=30_000)
+                    if pw_html and len(pw_html) > len(html):
+                        return pw_html
+                except Exception as pw_err:
+                    logger.warning("Playwright fallback failed for %s: %s", url, pw_err)
+
+            return html
         except Exception as exc:
             last_error = exc
             exc_msg = str(exc) or f"[{type(exc).__name__}]"
-            logger.warning("Client request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            logger.warning("Client request attempt %d/%d failed for %s: %s", attempt + 1, max_retries, url, exc_msg)
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
-            await asyncio.sleep(min(2**attempt, 4))
+            await backoff_sleep(attempt)
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -252,24 +354,41 @@ async def _request_json_with_client(
     json_data: Any | None = None,
     data: Any | None = None,
     timeout: float = 20.0,
-    max_retries: int = 3,
+    max_retries: int = 4,
 ) -> Any:
+    merged_headers = json_api_headers()
+    if headers:
+        merged_headers.update(headers)
+
     last_error: Exception | None = None
     for attempt in range(max_retries):
+        merged_headers["User-Agent"] = random_user_agent()
         try:
             if method.upper() == "POST":
-                response = await client.post(url, params=params, headers=headers, json=json_data, data=data)
+                response = await client.post(url, params=params, headers=merged_headers, json=json_data, data=data)
             else:
-                response = await client.get(url, params=params, headers=headers)
+                response = await client.get(url, params=params, headers=merged_headers)
+
+            if is_rate_limited(response.status_code):
+                wait = parse_retry_after(dict(response.headers)) or None
+                logger.warning("Rate-limited (429) on JSON request to %s", url)
+                await backoff_sleep(attempt + 1, base=3.0, cap=60.0) if wait is None else await asyncio.sleep(wait)
+                continue
+
+            if is_bot_blocked(response.status_code):
+                logger.warning("Bot-block (%d) on JSON request to %s", response.status_code, url)
+                await backoff_sleep(attempt, base=2.0, cap=20.0)
+                continue
+
             response.raise_for_status()
             return response.json()
         except Exception as exc:
             last_error = exc
             exc_msg = str(exc) or f"[{type(exc).__name__}]"
-            logger.warning("Client JSON request attempt %s failed for %s: %s", attempt + 1, url, exc_msg)
+            logger.warning("Client JSON request attempt %d/%d failed for %s: %s", attempt + 1, max_retries, url, exc_msg)
             if _is_client_error(exc) or attempt >= max_retries - 1:
                 raise RuntimeError(str(last_error)) from last_error
-            await asyncio.sleep(min(2**attempt, 4))
+            await backoff_sleep(attempt)
     raise RuntimeError(str(last_error)) from last_error
 
 
@@ -697,14 +816,7 @@ async def _crawl_workday_html(
     pages (which carry JSON-LD) instead.
     """
     search_url = f"https://{host}{board_path}/SearchJobs"
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        ),
-    }
+    headers = browser_headers()
 
     try:
         html = await request_with_retries(search_url, headers=headers, timeout=20.0, client=client)
@@ -931,17 +1043,11 @@ async def crawl_ats_jobs(
             # cookies carry into the POST below.
             try:
                 warm_url = f"https://{subdomain}.myworkdayjobs.com/en-US/{board}"
-                warm_headers = {
-                    "Accept": "text/html",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-                    ),
-                }
+                warm_headers = browser_headers()
                 if client is not None:
                     await client.get(warm_url, headers=warm_headers)
                 else:
-                    await request_with_retries(warm_url, headers=warm_headers, timeout=15.0)
+                    await request_with_retries(warm_url, headers=warm_headers, timeout=15.0, use_playwright_fallback=False)
             except Exception:
                 pass
 

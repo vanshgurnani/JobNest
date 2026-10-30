@@ -226,7 +226,13 @@ def test_job_from_search_result_url_extracts_title_and_id() -> None:
     assert job["job_id"] == "6365277"
 
 
-def test_fallback_extracts_jobs_from_search_result_urls() -> None:
+def test_fallback_extracts_jobs_from_search_result_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_discover(*args, **kwargs):
+        return []
+
+    import scrapers.crawlers.universal as universal
+    monkeypatch.setattr(universal, "discover_job_urls", fake_discover)
+
     html = """
     <a href="/in-en/careers/jobsearch?jk=Custom%20Software%20Engineer%20Python%20-%206365277&job_id=6365277">
       Expand job details
