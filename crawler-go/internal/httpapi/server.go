@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -18,7 +19,9 @@ func New(e *crawler.Engine,token string)http.Handler {
 	return securityHeaders(mux)
 }
 func(s *Server)crawl(w http.ResponseWriter,r *http.Request) {
-	if s.token!="" && !strings.EqualFold(strings.TrimPrefix(r.Header.Get("Authorization"),"Bearer " ),s.token){write(w,401,map[string]string{"error":"unauthorized"});return}
+	if s.token=="" { write(w,503,map[string]string{"error":"crawler API token is not configured"}); return }
+	auth:=strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"),"Bearer "))
+	if subtle.ConstantTimeCompare([]byte(auth),[]byte(s.token))!=1 { write(w,401,map[string]string{"error":"unauthorized"}); return }
 	r.Body=http.MaxBytesReader(w,r.Body,32<<10)
 	var in crawler.Request;dec:=json.NewDecoder(r.Body);dec.DisallowUnknownFields()
 	if err:=dec.Decode(&in);err!=nil{write(w,400,map[string]string{"error":"invalid request: "+err.Error()});return}
