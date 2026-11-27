@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.services.cache import build_cache_key, crawl_cache
 from app.services.job_store import find_companies, find_job_by_id, find_jobs
 from app.services.security import is_safe_url
+from app.services.go_crawler import crawl_with_go
 from app.schemas.job import Job, JobDetailResponse, JobListResponse, canonicalize_job
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,10 @@ async def get_jobs(
         logger.info("GET /jobs cache hit for key=%s", cache_key)
         return {**cached, "cache": "memory"}
 
+    # Preserve the legacy company_url workflow, but delegate all fetching to Go.
+    if company_url_valid:
+        await crawl_with_go(url=company_url_valid, company=company_valid, save=True)
+
     try:
         jobs, total = await find_jobs(
             company=company_valid,
@@ -169,6 +174,10 @@ async def get_company_jobs(
     if cached is not None:
         logger.info("GET /jobs/%s cache hit for key=%s", company_key, cache_key)
         return {**cached, "cache": "memory"}
+
+    # Existing clients can keep sending company_url; Go owns the crawl.
+    if company_url_valid:
+        await crawl_with_go(url=company_url_valid, company=company_key, save=True)
 
     try:
         jobs, total = await find_jobs(
