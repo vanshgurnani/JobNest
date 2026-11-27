@@ -8,7 +8,7 @@ JobNest combines a React frontend, FastAPI application backend, MongoDB, and a s
 - Go crawler: fetching, ATS detection, generic HTML and JSON-LD extraction, normalization, deduplication, and MongoDB upserts.
 - MongoDB: shared `jobs` collection using JobNest's existing document fields.
 
-The legacy Python scraper package and Python scrape manager have been removed. FastAPI no longer performs crawling.
+The legacy Python scraper package, Python scrape manager, obsolete scraper tests, and old scraper guides have been removed. FastAPI no longer performs crawling; it proxies crawl requests to Go. Existing `GET /jobs?company_url=...` clients remain compatible and trigger the Go crawler.
 
 ## Crawler coverage
 - Greenhouse, Lever, and Ashby public job-board endpoints.
