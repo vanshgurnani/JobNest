@@ -40,4 +40,4 @@ The legacy `POST /scrape` route returns HTTP 410 and directs clients to `/crawle
 
 ## Limitations and safety
 
-No universal scraper can guarantee access to every website. Respect robots.txt, terms, rate limits and public access restrictions. Login-only, CAPTCHA-protected and anti-bot blocked pages are not bypassed. The crawler rejects localhost/private IP targets, revalidates redirects, limits response size, bounds page traversal and applies request timeouts. Keep the crawler service private and configure a high-entropy shared token.
+No universal scraper can guarantee access to every website. Respect robots.txt, terms, rate limits and public access restrictions. The current Go implementation does not yet parse/enforce robots.txt automatically; add that before enabling broad scheduled crawling. Login-only, CAPTCHA-protected and anti-bot blocked pages are not bypassed. The crawler rejects localhost/private IP targets, revalidates redirects, limits response size, bounds page traversal and applies request timeouts. Keep the crawler service private and configure a high-entropy shared token.
