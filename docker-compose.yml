@@ -27,7 +27,7 @@ services:
       MONGO_URI: mongodb://mongodb:27017
       MONGO_DB_NAME: job_intelligence
       GO_CRAWLER_URL: http://crawler:8081
-      CRAWLER_API_TOKEN: ${CRAWLER_API_TOKEN}
+      CRAWLER_API_TOKEN: ${CRAWLER_API_TOKEN:?Set CRAWLER_API_TOKEN in .env}
     depends_on:
       mongodb:
         condition: service_healthy
