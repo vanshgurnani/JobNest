@@ -44,13 +44,48 @@ func (e *Engine) Crawl(ctx context.Context, in Request)(Result,error) {
 	case "greenhouse": jobs,err=parseGreenhouse(ctx,e,finalURL,in.Company)
 	case "lever": jobs,err=parseLever(ctx,e,finalURL,in.Company)
 	case "ashby": jobs,err=parseAshby(ctx,e,finalURL,in.Company)
-	default: jobs=parseHTML(body,finalURL,in.Company)
+	default: jobs,err=e.parseGenericCrawl(ctx,body,finalURL,in.Company,in.MaxPages)
 	}
 	if err!=nil { return Result{},err }
 	if len(jobs)==0 { jobs=parseHTML(body,finalURL,in.Company) }
 	if in.Save && e.store!=nil && len(jobs)>0 { if err=e.store.Upsert(ctx,jobs);err!=nil{return Result{},err} }
 	return Result{Target:in.URL,ATS:ats,Jobs:jobs,Count:len(jobs),Saved:in.Save&&len(jobs)>0},nil
 }
+
+func (e *Engine) parseGenericCrawl(ctx context.Context, body []byte, pageURL, company string, maxPages int) ([]model.Job,error) {
+	jobs:=parseHTML(body,pageURL,company)
+	doc,err:=goquery.NewDocumentFromReader(strings.NewReader(string(body))); if err!=nil{return jobs,nil}
+	base,_:=url.Parse(pageURL)
+	seen:=map[string]bool{pageURL:true}
+	candidates:=[]string{}
+	doc.Find("a[href]").Each(func(_ int,a *goquery.Selection){
+		href,ok:=a.Attr("href"); if !ok{return}
+		title:=strings.TrimSpace(a.Text()); if !jobish(title+" "+href){return}
+		ref,e:=url.Parse(href); if e!=nil{return}; target:=base.ResolveReference(ref)
+		if target.Host!=base.Host || (target.Scheme!="http"&&target.Scheme!="https"){return}
+		if !seen[target.String()] {seen[target.String()]=true;candidates=append(candidates,target.String())}
+	})
+	if maxPages<1 {maxPages=1}; if maxPages>25 {maxPages=25}
+	if len(candidates)>maxPages {candidates=candidates[:maxPages]}
+	// Fetch candidate job detail pages concurrently, but keep concurrency bounded.
+	type result struct { jobs []model.Job }
+	sem:=make(chan struct{},e.cfg.Workers); if cap(sem)<1 {sem=make(chan struct{},4)}
+	results:=make(chan result,len(candidates))
+	var wg sync.WaitGroup
+	for _,target:=range candidates {
+		wg.Add(1); go func(target string) {
+			defer wg.Done()
+			select {case sem<-struct{}{}: case <-ctx.Done(): return}
+			defer func(){<-sem}()
+			page,final,fetchErr:=e.fetch(ctx,target); if fetchErr!=nil{return}
+			results<-result{jobs:parseHTML(page,final,company)}
+		}(target)
+	}
+	wg.Wait(); close(results)
+	for item:=range results {jobs=append(jobs,item.jobs...)}
+	return dedupe(jobs),nil
+}
+
 func (e *Engine) fetch(ctx context.Context, raw string)([]byte,string,error) {
 	req,err:=http.NewRequestWithContext(ctx,http.MethodGet,raw,nil);if err!=nil{return nil,"",err}
 	req.Header.Set("User-Agent",e.cfg.UserAgent);req.Header.Set("Accept","text/html,application/json,application/ld+json,*/*;q=0.8")
