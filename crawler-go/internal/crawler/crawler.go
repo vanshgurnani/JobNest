@@ -37,6 +37,7 @@ func validateTarget(u *url.URL) error {
 }
 func (e *Engine) Crawl(ctx context.Context, in Request)(Result,error) {
 	u,err:=url.Parse(strings.TrimSpace(in.URL)); if err!=nil{return Result{},err}; if err=validateTarget(u);err!=nil{return Result{},err}
+	if strings.TrimSpace(in.Company)=="" { in.Company=u.Hostname() }
 	if in.MaxPages<1 { in.MaxPages=5 }; if in.MaxPages>25 { in.MaxPages=25 }
 	body,finalURL,err:=e.fetch(ctx,u.String()); if err!=nil{return Result{},err}
 	ats:=detectATS(finalURL,body)
