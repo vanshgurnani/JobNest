@@ -48,7 +48,7 @@ func (e *Engine) Crawl(ctx context.Context, in Request)(Result,error) {
 	case "ashby": jobs,err=parseAshby(ctx,e,finalURL,in.Company)
 	default: jobs,err=e.parseGenericCrawl(ctx,body,finalURL,in.Company,in.MaxPages)
 	}
-	if err!=nil { return Result{},err }
+	if err!=nil { jobs=parseHTML(body,finalURL,in.Company); if len(jobs)==0 { jobs,err=e.parseGenericCrawl(ctx,body,finalURL,in.Company,in.MaxPages) }; if err!=nil { return Result{},err } }
 	if len(jobs)==0 { jobs=parseHTML(body,finalURL,in.Company) }
 	if in.Save && e.store!=nil && len(jobs)>0 { if err=e.store.Upsert(ctx,jobs);err!=nil{return Result{},err} }
 	return Result{Target:in.URL,ATS:ats,Jobs:jobs,Count:len(jobs),Saved:in.Save&&len(jobs)>0},nil
