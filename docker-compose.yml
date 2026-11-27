@@ -1,15 +1,14 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  # MongoDB Database Container
   mongodb:
     image: mongo:7.0
     container_name: job_mongo
-    restart: always
+    restart: unless-stopped
     ports:
       - "27017:27017"
     environment:
-      - MONGO_INITDB_DATABASE=job_intelligence
+      MONGO_INITDB_DATABASE: job_intelligence
     volumes:
       - mongo_data:/data/db
     healthcheck:
@@ -17,37 +16,39 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 5s
 
-  # FastAPI Web Backend Application
   web:
     build: .
     container_name: job_api
-    restart: always
+    restart: unless-stopped
     ports:
       - "10000:10000"
     environment:
-      - MONGO_URI=mongodb://mongodb:27017/job_intelligence
-      - MONGO_DB_NAME=job_intelligence
-      - CORS_ORIGINS=*
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB_NAME: job_intelligence
+      GO_CRAWLER_URL: http://crawler:8081
+      CRAWLER_API_TOKEN: ${CRAWLER_API_TOKEN:?Set CRAWLER_API_TOKEN in .env}
     depends_on:
       mongodb:
         condition: service_healthy
+      crawler:
+        condition: service_started
 
-  # Scraper Runner Container (Runs scraper in DB mode)
-  scraper:
-    build: .
-    container_name: job_scraper
+  crawler:
+    build:
+      context: ./crawler-go
+    container_name: jobnest_go_crawler
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
     environment:
-      - MONGO_URI=mongodb://mongodb:27017/job_intelligence
-      - MONGO_DB_NAME=job_intelligence
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB_NAME: job_intelligence
+      CRAWLER_API_TOKEN: ${CRAWLER_API_TOKEN}
+      CRAWLER_ADDR: :8081
     depends_on:
       mongodb:
         condition: service_healthy
-    command: python scrapers/scrape_jobs.py --mode db --companies all --pages 2
-    profiles:
-      - tools
 
 volumes:
   mongo_data:
-    driver: local

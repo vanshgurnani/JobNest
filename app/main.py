@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.api.jobs import router as jobs_router
+from app.api.crawler import router as crawler_router
 from app.config import get_settings
 from app.db.mongo import close_mongo, connect_mongo, ping_mongo
 from app.services.logging_setup import setup_logging
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
 settings = get_settings()
 app = FastAPI(title="AI Job Intelligence Crawler", version="1.0.0", lifespan=lifespan)
 app.include_router(jobs_router)
+app.include_router(crawler_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,14 +74,7 @@ async def request_logging_middleware(request: Request, call_next):
     return response
 
 
-@app.on_event("startup")
-async def start_scheduler():
-    try:
-        from scrapers.scheduler import scheduler
-        scheduler.start()
-    except Exception:
-        logger.exception("Scheduler failed to start")
-
+# Crawling is owned by the standalone Go crawler service.
 
 @app.get("/html")
 async def index():
