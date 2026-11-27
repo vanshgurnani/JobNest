@@ -15,6 +15,7 @@ import (
 )
 
 func main() {
+	if os.Getenv("CRAWLER_API_TOKEN") == "" { log.Fatal("CRAWLER_API_TOKEN is required") }
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
