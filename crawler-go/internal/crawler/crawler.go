@@ -23,16 +23,41 @@ type Saver interface { Upsert(context.Context, []model.Job) error }
 type Config struct { Workers int; Timeout time.Duration; MaxBody int64; UserAgent string }
 func ConfigFromEnv() Config { return Config{Workers:8,Timeout:20*time.Second,MaxBody:5<<20,UserAgent:"JobNestBot/1.0 (+job discovery; respect robots.txt and site terms)"} }
 type Engine struct { store Saver; cfg Config; client *http.Client }
-func New(s Saver,c Config)*Engine { if c.Workers<1{c.Workers=8}; if c.Timeout==0{c.Timeout=20*time.Second}; if c.MaxBody==0{c.MaxBody=5<<20}; return &Engine{store:s,cfg:c,client:&http.Client{Timeout:c.Timeout,CheckRedirect:func(req *http.Request,via []*http.Request)error{if len(via)>=5{return fmt.Errorf("redirect limit")};return validateTarget(req.URL)}}} }
+func New(s Saver,c Config)*Engine {
+	if c.Workers<1 { c.Workers=8 }; if c.Timeout==0 { c.Timeout=20*time.Second }; if c.MaxBody==0 { c.MaxBody=5<<20 }
+	transport:=&http.Transport{DialContext:safeDialContext}
+	return &Engine{store:s,cfg:c,client:&http.Client{Timeout:c.Timeout,Transport:transport,CheckRedirect:func(req *http.Request,via []*http.Request)error{if len(via)>=5{return fmt.Errorf("redirect limit")};return validateTarget(req.URL)}}}
+}
 type Request struct { URL string `json:"url"`; Company string `json:"company,omitempty"`; MaxPages int `json:"max_pages,omitempty"`; Save bool `json:"save,omitempty"` }
 type Result struct { Target string `json:"target"`; ATS string `json:"ats"`; Jobs []model.Job `json:"jobs"`; Count int `json:"count"`; Saved bool `json:"saved"` }
 
+func isPublicIP(ip net.IP) bool {
+	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified()
+}
+
+// safeDialContext pins each connection to a validated public IP, preventing DNS
+// rebinding between URL validation and the actual TCP connection.
+func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address); if err != nil { return nil, err }
+	if ip := net.ParseIP(host); ip != nil {
+		if !isPublicIP(ip) { return nil, fmt.Errorf("private or non-global target blocked") }
+		return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host); if err != nil { return nil, err }
+	for _, ip := range ips {
+		if !isPublicIP(ip) { continue }
+		conn, dialErr := (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if dialErr == nil { return conn, nil }
+	}
+	return nil, fmt.Errorf("host has no reachable public IP address")
+}
+
 func validateTarget(u *url.URL) error {
-	if u==nil || (u.Scheme!="http" && u.Scheme!="https") || u.Hostname()=="" { return fmt.Errorf("only http/https URLs are accepted") }
-	host:=strings.ToLower(u.Hostname())
-	if host=="localhost" || strings.HasSuffix(host,".localhost") || strings.HasSuffix(host,".local") { return fmt.Errorf("local addresses are not crawlable") }
-	ips,err:=net.LookupIP(host); if err!=nil{return fmt.Errorf("resolve host: %w",err)}
-	for _,ip:=range ips { if ip.IsLoopback()||ip.IsPrivate()||ip.IsLinkLocalUnicast()||ip.IsUnspecified() { return fmt.Errorf("private or local network targets are blocked") } }
+	if u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" { return fmt.Errorf("only http/https URLs are accepted") }
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") { return fmt.Errorf("local addresses are not crawlable") }
+	ips, err := net.LookupIP(host); if err != nil { return fmt.Errorf("resolve host: %w", err) }
+	for _, ip := range ips { if !isPublicIP(ip) { return fmt.Errorf("private or non-global network targets are blocked") } }
 	return nil
 }
 func (e *Engine) Crawl(ctx context.Context, in Request)(Result,error) {
