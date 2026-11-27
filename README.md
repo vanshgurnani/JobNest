@@ -1,230 +1,80 @@
-# Job Nest — AI Job Intelligence Platform
+# JobNest
 
-**Job Nest** is an intelligent job aggregation platform that scrapes, normalizes, and serves job listings from hundreds of companies through a unified, searchable API and a modern React frontend. Built to solve the problem of fragmented job hunting — where opportunities are scattered across hundreds of company career portals, each with its own format, ATS, and search interface.
-
-## Why Job Nest?
-
-Job hunting today means checking 20+ career sites, each with different UX, filters, and update cycles. Job Nest consolidates everything into one place:
-
-- **Unified schema** — every job, from any company or ATS, stored in a consistent format
-- **ATS-aware scraping** — automatically detects and adapts to Lever, Greenhouse, Workday, Ashby, SmartRecruiters, and custom career portals
-- **Dynamic generic scraper** — cascading extraction pipeline (JSON-LD → embedded JSON → anchor analysis → BS4 heuristic) for any company without a dedicated crawler
-- **Intelligent routing** — automatically selects ATS → generic fallback per URL
-- **Single universal crawler** — handles all companies via ATS detection and dynamic extraction
-- **Intelligent parsing** — extracts role, skills, and experience level from raw titles and descriptions
-- **Dual mode** — preview scraped jobs locally or persist to MongoDB
-- **Clean frontend** — search, filter, save, and explore jobs with a fast, responsive UI
-
-## What's Built
-
-### Backend (FastAPI / Python)
-
-- **REST API** — `GET /jobs`, `GET /jobs/{company}`, `GET /job/{job_id}`, `GET /health`
-- **Async MongoDB** — Motor driver with automatic indexing on startup
-- **In-memory cache** — TTL (15 min) + LRU eviction (512 entries), async-safe
-- **CORS middleware** — configurable origins for dev and production
-- **Graceful degradation** — API remains available (serving cache) when MongoDB is down
-- **Job canonicalization** — stable SHA-256 based job IDs for deduplication
-- **Title parser** — regex-based extraction of role, skills, and experience level
-
-### Scraping Engine (Async Python)
-
-- **Universal ATS-aware crawler**: detects and scrapes Lever, Greenhouse, Workday, Ashby, SmartRecruiters + any company via dynamic extraction
-- **Multi-strategy extraction**: JSON-LD, embedded JSON, HTML anchor analysis, secondary API enrichment
-- **Auto-retry** with exponential backoff (3 retries)
-- **Deduplication** by (company + job_id/url/title+location)
-- **Expired job detection** via `valid_through` and keyword matching
-- **10+ known company career URLs**: Accenture, Cognizant, Google, Infosys, JPMorgan, Mastercard, TCS, Wipro, KPMG, Zoho
-- **CLI entry point** with argparse: `--companies`, `--keyword`, `--location`, `--pages`, `--mode`
-
-### Frontend (React / Tailwind)
-
-- **Responsive UI** with glassmorphic sticky header and dark theme
-- **Hero section** with keyword + location search form
-- **Popular companies** quick-filter (Google, Microsoft, Amazon, Meta, Apple, Netflix, Stripe, Shopify, GitHub)
-- **Paginated listings** (20 per page) with loading skeletons
-- **Sidebar filters**: Job Type, Experience Level, Salary Range
-- **Job detail page** with company icon, metadata, skills tags, save/bookmark, apply link
-- **LocalStorage-based bookmarks** — persisted across sessions
-- **Time-ago display** ("2h ago", "3d ago")
-- **Scroll-triggered animations** via Intersection Observer
-- **Client-side caching** with 10-minute TTL and race-condition-safe requests
-
-### Infrastructure
-
-- **Docker Compose** — 3 services: MongoDB, Web API, Scraper (optional profile)
-- **Dockerfile** — Python 3.11-slim, ASGI via Uvicorn
-- **MongoDB health checks** and named volume for data persistence
-- **Vite proxy** config for local frontend dev (port 5174 → 8000)
-- **Tests** — 16 unit tests covering ATS detection, JSON-LD parsing, deduplication, URL resolution, error handling
-
-### Authentication (Scaffolded — Not Yet Wired)
-
-- User schemas (`UserCreate`, `UserLogin`, `UserPublic`, `TokenResponse`) defined in Pydantic
-- JWT config (`HS256`, 7-day expiry) in settings
-- MongoDB indexes for `users`, `saved_jobs`, `search_history` collections
-- No auth middleware, routes, or password hashing implemented yet
-
-## Quick Start
-
-### Backend
-
-```bash
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python run.py
-```
-
-### Scrape Jobs (Preview — no DB required)
-
-```bash
-python scrapers/scrape_jobs.py --mode local --company-url "https://careers.google.com"
-```
-
-### Scrape with Generic-Only Mode (Skip ATS Routing)
-
-```bash
-python scrapers/scrape_jobs.py --mode local --generic-only --company-url "https://jobs.apple.com/en-in/search"
-```
-
-### Scrape Jobs (Store to MongoDB)
-
-```bash
-python scrapers/scrape_jobs.py --mode db --company-url "https://careers.google.com,https://jobs.apple.com" --pages 2
-```
-
-### Frontend
-
-```bash
-cd job-portal && npm install && npm run dev
-```
-
-### Docker (full stack)
-
-```bash
-docker compose up -d
-docker compose --profile tools run scraper
-```
+JobNest combines a React frontend, FastAPI application backend, MongoDB, and a standalone Go universal job crawler.
 
 ## Architecture
+- React frontend: job discovery, filters, and job details.
+- FastAPI: existing job read/search APIs plus a `/crawler/scan` proxy.
+- Go crawler: fetching, ATS detection, generic HTML and JSON-LD extraction, normalization, deduplication, and MongoDB upserts.
+- MongoDB: shared `jobs` collection using JobNest's existing document fields.
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    Frontend (React + Vite)           │
-│  job-portal/src/                                     │
-│  ├── pages/       HomePage, FindJobsPage, JobDetail  │
-│  ├── components/  Navbar, JobCard, Filters, etc.     │
-│  ├── hooks/       useJobs (caching, loading state)   │
-│  └── services/    api.js (fetch wrapper)             │
-└──────────────┬──────────────────────────────────────┘
-               │  HTTP (proxy / Vite dev)
-               ▼
-┌──────────────────────────────────────────────────────┐
-│                   Backend (FastAPI / Python)          │
-│  app/                                                 │
-│  ├── main.py          App setup, CORS, lifespan       │
-│  ├── api/jobs.py      Route handlers + caching        │
-│  ├── services/                                         │
-│  │   ├── job_store.py  MongoDB queries                │
-│  │   ├── cache.py      TTL + LRU cache                │
-│  │   ├── ai_parser.py  Title → role/skills/exp        │
-│  │   └── normalizer.py Field mapping                  │
-│  ├── schemas/job.py    Pydantic models                │
-│  ├── schemas/user.py   Auth/saved/search schemas      │
-│  ├── db/mongo.py       Motor connection + indexes     │
-│  └── config.py         Settings (env vars)            │
-└──────────────┬───────────────────────────────────────┘
-               │  read/write
-               ▼
-┌───────────────────────────────────────────────────────┐
-│                    MongoDB (Motor async)               │
-│  Collections: jobs, users, saved_jobs, search_history  │
-└──────────────┬────────────────────────────────────────┘
-               │  upsert
-┌──────────────▼────────────────────────────────────────┐
-│                   Scraper Engine (Async Python)        │
-│  scrapers/                                             │
-│  ├── scrape_jobs.py     CLI entry point (argparse)     │
-│  └── crawlers/                                         │
-│      ├── orchestrator.py  Universal crawler dispatcher │
-│      ├── base.py          HTTP retry, ATS detection    │
-│      └── universal.py     Universal ATS-aware crawler  │
-└────────────────────────────────────────────────────────┘
+The legacy Python scraper package and Python scrape manager have been removed. FastAPI no longer performs crawling.
+
+## Crawler coverage
+- Greenhouse, Lever, and Ashby public job-board endpoints.
+- Generic career pages via same-domain job-link discovery and Schema.org `JobPosting` JSON-LD.
+- Individual public job URLs.
+- SmartRecruiters and Workday are detected but currently use generic extraction; dedicated adapters remain future work.
+- JavaScript-only, authenticated, CAPTCHA-protected, and anti-bot pages may require additional site-specific handling. No crawler can guarantee every website.
+
+## Local setup
+Create a root `.env` file:
+```env
+MONGO_URI=mongodb+srv://<user>:<password>@<cluster>/
+MONGO_DB_NAME=job_intelligence
+CRAWLER_API_TOKEN=replace-with-a-long-random-secret
+GO_CRAWLER_URL=http://localhost:8081
 ```
 
-## API Endpoints
-
-| Method | Endpoint | Description | Params |
-|--------|----------|-------------|--------|
-| GET | `/health` | Health check (includes MongoDB status) | — |
-| GET | `/jobs` | Paginated job listings | `company`, `keyword`, `location`, `page`, `limit` |
-| GET | `/jobs/{company}` | Jobs filtered by company | `keyword`, `location`, `page`, `limit` |
-| GET | `/job/{job_id}` | Single job detail | — |
-
-## Supported Companies
-
-| Company | Strategy |
-|---------|----------|
-| Any career portal | Universal ATS detection → dynamic extraction (JSON-LD → embedded JSON → anchor links → BS4 heuristic) |
-| Lever / Greenhouse / Workday / Ashby / SmartRecruiters | ATS detection → platform-specific API calls |
-
-## Project Structure
-
-```
-├── app/                     FastAPI backend
-│   ├── api/                 Route handlers
-│   ├── db/                  MongoDB connection
-│   ├── schemas/             Pydantic models
-│   └── services/            Business logic (cache, store, parser)
-├── scrapers/                Async scraping engine
-│   └── crawlers/            Universal crawler + base utilities
-├── job-portal/              React + Vite frontend
-├── scripts/                 Helper scripts
-├── tests/                   Pytest unit tests (16 tests)
-├── docs/                    Documentation (ARCHITECTURE, API, SETUP, etc.)
-├── docker-compose.yml       3-service orchestration
-├── Dockerfile               Backend container
-└── requirements.txt         Python dependencies
+Start the Go service:
+```bash
+cd crawler-go
+go mod tidy
+go run ./cmd/crawler
 ```
 
-## Stack
+Start FastAPI from the repository root:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 10000
+```
 
-### Backend
-- **Python 3.11** / **FastAPI 0.115** — async web framework
-- **MongoDB 7** / **Motor 3.6** — async database driver
-- **HTTPX 0.28** — async HTTP client
-- **BeautifulSoup4 + lxml** — HTML parsing
-- **Pydantic 2.10** — data validation
+Start the frontend:
+```bash
+cd job-portal
+npm install
+npm run dev
+```
 
-### Frontend
-- **React 18** — UI framework
-- **React Router 6** — client-side routing
-- **Tailwind CSS 3.4** — utility-first styling
-- **Vite 5** — build tool and dev server
+## Submit a URL
+FastAPI endpoint:
+```bash
+curl -X POST http://localhost:10000/crawler/scan \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://boards.greenhouse.io/example","company":"Example","save":true,"max_pages":5}'
+```
 
-### Infrastructure
-- **Docker** / **Docker Compose** — containerization
-- **Pytest** — unit testing
+Direct Go endpoint (internal; bearer token required):
+```bash
+curl -X POST http://localhost:8081/crawl \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer replace-with-a-long-random-secret' \
+  -d '{"url":"https://boards.greenhouse.io/example","company":"Example","save":true}'
+```
 
-## Documentation
+FastAPI docs: http://localhost:10000/docs
 
-| Document | Description |
-|---|---|
-| [Architecture](docs/ARCHITECTURE.md) | System design and codebase walkthrough |
-| [API Reference](docs/API.md) | REST endpoints, schemas, examples |
-| [Scraper Guide](docs/SCRAPER_GUIDE.md) | CLI usage and crawler internals |
-| [Setup Guide](docs/SETUP.md) | Local development setup |
-| [Docker Deployment](docs/DOCKER_DEPLOYMENT.md) | Containerized deployment |
+## Docker Compose
+Set `CRAWLER_API_TOKEN` in `.env`, then run:
+```bash
+docker compose up --build
+```
 
-## What's Next (Scaffolded but Not Yet Implemented)
+Services: FastAPI on port 10000, Go crawler on port 8081, MongoDB on port 27017.
 
-- **User authentication** — register/login with JWT (schemas, indexes, and config exist)
-- **Saved jobs** — persisted bookmarks per user
-- **Search history** — per-user search tracking
-- **Rate limiting** — config-based (settings exist, middleware not wired)
-- **Frontend serving** — FastAPI serving `job-portal/dist/` in production
-- **Frontend tests** — no test runner configured for the React app
+## Safety and limitations
+The crawler accepts HTTP(S) targets, blocks localhost/private IP destinations, revalidates redirects, caps response size, applies timeouts, and requires a service token. Respect robots.txt, website terms, and per-site rate limits. It does not bypass authentication, CAPTCHAs, or access controls.
 
-## License
-
-MIT
+This is the first Go crawler foundation. Scheduled company-wide crawling, persistent crawl jobs, richer ATS adapters, and browser rendering are follow-up improvements.
