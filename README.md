@@ -75,6 +75,6 @@ docker compose up --build
 Services: FastAPI on port 10000, Go crawler on port 8081, MongoDB on port 27017.
 
 ## Safety and limitations
-The crawler accepts HTTP(S) targets, blocks localhost/private IP destinations, revalidates redirects, caps response size, applies timeouts, and requires a service token. Respect robots.txt, website terms, and per-site rate limits. It does not bypass authentication, CAPTCHAs, or access controls.
+The crawler accepts HTTP(S) targets, blocks localhost/private IP destinations, revalidates redirects, caps response size, applies timeouts, and requires a service token. Respect robots.txt, website terms, and per-site rate limits. Automatic robots.txt enforcement is not implemented yet, so do not enable unattended broad crawling until that is added. The crawler does not bypass authentication, CAPTCHAs, or access controls.
 
 This is the first Go crawler foundation. Scheduled company-wide crawling, persistent crawl jobs, richer ATS adapters, and browser rendering are follow-up improvements.
