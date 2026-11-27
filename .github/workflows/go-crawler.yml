@@ -1,0 +1,27 @@
+name: Go crawler CI
+
+on:
+  push:
+    paths:
+      - "crawler-go/**"
+      - ".github/workflows/go-crawler.yml"
+  pull_request:
+    paths:
+      - "crawler-go/**"
+      - ".github/workflows/go-crawler.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: crawler-go/go.mod
+      - name: Test
+        working-directory: crawler-go
+        run: go test ./...
+      - name: Build
+        working-directory: crawler-go
+        run: go build ./cmd/crawler
