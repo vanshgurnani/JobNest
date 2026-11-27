@@ -37,9 +37,9 @@ func (e *Engine) apiJobs(ctx context.Context,endpoint,source,company string)([]m
 		desc:=get("content","description")
 		co:=company;if co==""{co=get("company","companyName")}
 		loc:=get("location")
+		if lm,ok:=m["location"].(map[string]any);ok { loc=fmt.Sprint(lm["name"]) }
 		if lm,ok:=m["categories"].(map[string]any);ok&&loc==""{loc=fmt.Sprint(lm["location"])}
-		id:=get("id")
-		if id==""{id=stableID(link,co,title)}
+		id:=stableID(source,get("id"),link,co,title)
 		out=append(out,model.Job{ID:id,JobID:id,Company:co,Title:title,Location:loc,Description:stripHTML(desc),ApplyURL:link,URL:link,Source:source,PostedDate:get("createdAt","updatedAt","publishedAt")})
 	}
 	return dedupe(out),nil
