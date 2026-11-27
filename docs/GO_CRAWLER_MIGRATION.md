@@ -36,7 +36,7 @@ Content-Type: application/json
 }
 ```
 
-The legacy `POST /scrape` route returns HTTP 410 and directs clients to `/crawler/scan`.
+The legacy `POST /scrape` route returns HTTP 410 and directs clients to `/crawler/scan`. Existing `GET /jobs?company_url=...` and `GET /jobs/{company}?company_url=...` clients are preserved: FastAPI now delegates those URL-based crawl requests to Go before reading the shared jobs collection.
 
 ## Limitations and safety
 
